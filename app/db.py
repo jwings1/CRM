@@ -36,10 +36,22 @@ async def _init_conn(conn: asyncpg.Connection) -> None:
 
 async def connect() -> asyncpg.Pool:
     global pool
-    pool = await asyncpg.create_pool(
-        config.DATABASE_URL, min_size=config.DB_POOL_MIN, max_size=config.DB_POOL_MAX,
-        init=_init_conn, command_timeout=300,
-    )
+    import asyncio
+    import logging
+    log = logging.getLogger("crm")
+    host = config.DATABASE_URL.split("@")[-1].split("/")[0]
+    for attempt in range(30):  # Railway private network / Postgres may need a few seconds at boot
+        try:
+            pool = await asyncpg.create_pool(
+                config.DATABASE_URL, min_size=config.DB_POOL_MIN, max_size=config.DB_POOL_MAX,
+                init=_init_conn, command_timeout=300,
+            )
+            break
+        except (OSError, asyncpg.PostgresError) as e:
+            log.warning("db connect to %s failed (attempt %d): %r", host, attempt + 1, e)
+            if attempt == 29:
+                raise
+            await asyncio.sleep(2)
     async with pool.acquire() as conn:
         # one boot at a time when several workers start together
         await conn.execute("SELECT pg_advisory_lock(424242)")

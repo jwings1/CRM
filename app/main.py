@@ -20,6 +20,9 @@ log = logging.getLogger("crm")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    log.warning("boot: CRM_TOKEN %s, OPENROUTER_API_KEY %s, DATABASE_URL host %s",
+                "set" if config.CRM_TOKEN else "MISSING", "set" if config.OPENROUTER_API_KEY else "MISSING",
+                config.DATABASE_URL.split("@")[-1].split("/")[0])
     await db.connect()
     yield
     await db.close()

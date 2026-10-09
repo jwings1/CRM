@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 
+from . import setup
 from .csvio import read_export
 
 
@@ -32,5 +33,6 @@ async def run(pool, zip_bytes: bytes) -> dict:
     result = await asyncio.to_thread(transform, data)
     async with pool.acquire() as conn:
         async with conn.transaction():
+            result["ids"] = await setup.ensure(conn)   # properties, pipelines, list (appendix)
             await load(conn, result)
     return result.get("stats", {})

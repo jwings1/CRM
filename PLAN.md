@@ -115,7 +115,7 @@ Speed: do everything in Python dicts, then `copy_records_to_table`. Pre-allocate
 
 ## Lane C details — assistant
 
-- Model `openai/gpt-6-luna` only, via OpenRouter, key `OPENROUTER_API_KEY`. **$10 for the whole day incl. evaluation.** No dev loops; every form check spends a call.
+- Model `openai/gpt-6-luna` only, via OpenRouter, key `OPENROUTER_API_KEY`. **$10 for the whole day incl. evaluation.** Measured price: ~$0.10/M input, ~$0.50/M output tokens -> a full multi-step conversation costs ~$0.01-0.03. Testing is fine; runaway loops are not. Key is set on Railway; locally put it in `.env` (never commit).
 - Tools call `app/store.py` directly (so R7/R10/R11/R12 fire): `search_records`, `get_record` (with associations), `create_record`, `update_record`, `associate`, `list_pipelines`.
 - System prompt: Italian, `context.now` is "today", `context.user` is the writer; "my customers" = companies on deals where `commerciale` = user or tickets where `assegnatario` = user. Multiple matches → ask. Violates a rule (dup P.IVA, inactive user, missing record) → don't act, explain. After a write, read back and state exactly what changed. Never touch other records.
 - Attachments: CSV text with `;` separator in `messages[].attachments[].content`.

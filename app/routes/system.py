@@ -29,11 +29,14 @@ async def reset():
 
 
 async def download(url: str) -> bytes:
-    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(120, connect=15)) as client:
-        r = await client.get(url)
-        if r.status_code >= 400:
-            raise ApiError(400, f"export_url returned HTTP {r.status_code}")
-        return r.content
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(120, connect=15)) as client:
+            r = await client.get(url)
+    except httpx.HTTPError as e:
+        raise ApiError(400, f"could not download export_url: {type(e).__name__}: {e}")
+    if r.status_code >= 400:
+        raise ApiError(400, f"export_url returned HTTP {r.status_code}")
+    return r.content
 
 
 @router.post("/__migrate", status_code=204)
