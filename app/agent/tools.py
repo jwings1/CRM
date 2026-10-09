@@ -1,168 +1,232 @@
-"""Restricted CRM tools. All record mutations use the shared store and read back."""
+"""Request-local tool execution and verified actions through app.store."""
 from __future__ import annotations
 
-import inspect
+import re
+from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from typing import Any
 
-from .. import db, search, store
+from .. import db, store
+from ..defaults import ASSOC_TYPES
 from ..errors import ApiError
+from . import csv_import, kb, read
 
 
-def tool(name, description, properties, required=()):
+def definition(name: str, description: str, properties: dict, required: tuple = ()) -> dict:
     return {"type": "function", "function": {"name": name, "description": description,
-            "parameters": {"type": "object", "properties": properties, "required": list(required),
-                           "additionalProperties": False}}}
+            "parameters": {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}}}
+
 
 S = {"type": "string"}
-O = {"type": "object"}
-T = {"type": "string", "description": "companies, contacts, deals, tickets, products, line_items, notes, calls, emails, meetings, tasks"}
-TOOLS = [
-    tool("search_records", "Search CRM. filterGroups use HubSpot operators; associations.companies EQ company ID finds its deals/contacts. Exact total and pagination. Never assume the first match is the intended record.",
-         {"object_type": T, "query": S, "filterGroups": {"type": "array", "items": O}, "sorts": {"type": "array", "items": {}}, "limit": {"type": "integer"}, "after": S, "my_customers": {"type": "boolean"}}, ["object_type"]),
-    tool("get_record", "Read all properties and associated records, using CRM ID or id_property=id_legacy/email. Required before an update.",
-         {"object_type": T, "id": S, "id_property": S}, ["object_type", "id"]),
-    tool("list_pipelines", "Get exact pipeline and stage IDs/labels. Never invent stage IDs.", {"object_type": T}, ["object_type"]),
-    tool("list_properties", "Get writable property names, types and allowed enum values.", {"object_type": T}, ["object_type"]),
-    tool("list_users", "Resolve employee names/emails and check active status before assignments.", {"query": S}),
-    tool("create_record", "Create one explicitly requested record. Associations reference previously read IDs. Returns persisted record and automation results.",
-         {"object_type": T, "properties": O, "associations": {"type": "array", "items": {"type": "object", "properties": {"object_type": T, "id": S}, "required": ["object_type", "id"]}}}, ["object_type", "properties"]),
-    tool("update_record", "Patch only explicitly requested fields on a previously read, unambiguous record. Empty string clears a field. Runs all CRM rules and reads back.",
-         {"object_type": T, "id": S, "properties": O}, ["object_type", "id", "properties"]),
-    tool("associate", "Associate two previously read records using the default association. Does not replace the primary company.",
-         {"from_type": T, "from_id": S, "to_type": T, "to_id": S}, ["from_type", "from_id", "to_type", "to_id"]),
-    tool("company_revenue", "Exact won-deal revenue for a company/year, net of refunds. EUR; USD x0.92, GBP x1.17. For 2025 use authoritative fatturato_2025 when present.",
-         {"company_id": S, "year": {"type": "integer"}}, ["company_id", "year"]),
+I = {"type": "integer"}
+B = {"type": "boolean"}
+O = {"type": "object", "additionalProperties": True}
+REF = {"type": "object", "properties": {"object_type": S, "id": S}, "required": ["object_type", "id"], "additionalProperties": False}
+FILTERS = {"type": "array", "items": {"type": "object", "properties": {
+    "filters": {"type": "array", "items": O}}, "required": ["filters"]}}
+SEARCH = {"object_type": S, "query": S, "filter_groups": FILTERS, "related_to": REF,
+          "my_customers": B, "after": I, "limit": I,
+          "sorts": {"type": "array", "items": S}}
+
+TOOL_DEFINITIONS = [
+    definition("list_kb_documents", "List current published knowledge documents and revisions.", {}),
+    definition("search_knowledge_base", "Search live Postgres company documents. Use short Italian keywords, an R number, document ID or SKU. Empty results mean no document found.", {"query": S, "max_results": I}, ("query",)),
+    definition("get_kb_document", "Read a full published document, optionally a specific revision.", {"doc_id": S, "revision": I}, ("doc_id",)),
+    definition("get_related_knowledge", "Read an internal graph neighborhood and documents applicable to a CRM record. This graph is live; depth at most two.", {**REF["properties"], "depth": I}, ("object_type", "id")),
+    definition("search_records", "Search live CRM records. filter_groups is OR of groups of AND filters: propertyName, operator, value/values/highValue. Supports associations.TYPE. For my customers set my_customers=true on companies. Multiple matches require clarification before writing.", SEARCH, ("object_type",)),
+    definition("get_record", "Read current properties and association IDs. Use id_property=id_legacy/email/hs_sku for exact identity lookups.", {"object_type": S, "id": S, "id_property": S}, ("object_type", "id")),
+    definition("get_related_records", "List records directly associated with a verified record, deduplicated; follow after for further pages.", {**REF["properties"], "target_type": S, "after": I, "limit": I}, ("object_type", "id")),
+    definition("get_activity_history", "Read notes, calls, emails and meetings for a record. For a company includes history on its contacts and deals.", {**REF["properties"], "after": I, "limit": I}, ("object_type", "id")),
+    definition("list_pipelines", "Read real pipeline/stage IDs and property definitions/options before creating or patching properties.", {"object_type": S}, ("object_type",)),
+    definition("list_users", "Find imported employees by email, name or legacy ID and check whether they are active.", {"query": S, "active_only": B}),
+    definition("aggregate_records", "Compute exact count or sum over ALL matching records in code. Monetary sums remain separated by currency. Missing values are disclosed. Never add numbers yourself.", {**SEARCH, "operation": {"type": "string", "enum": ["count", "sum"]}, "field": S, "group_by": S}, ("object_type", "operation")),
+    definition("create_record", "Create ONLY a record requested by the user. Properties are validated; associations target previously verified records. Hooks fire and result is read back.", {"object_type": S, "properties": O, "associations": {"type": "array", "items": REF}}, ("object_type", "properties")),
+    definition("update_record", "Patch ONLY requested fields on a previously resolved record. Never select an arbitrary match. Read-back and automation outcomes are returned.", {"object_type": S, "id": S, "properties": O}, ("object_type", "id", "properties")),
+    definition("archive_record", "Archive a previously resolved record ONLY when explicitly requested by the user.", REF["properties"], ("object_type", "id")),
+    definition("associate", "Associate two previously verified records when the user requests it. Optional association_type_id must match the object types.", {"from": REF, "to": REF, "association_type_id": I}, ("from", "to")),
+    definition("preview_csv", "Read a supplied CSV attachment by index, columns, row count and first rows. Never invent attachment content.", {"attachment_index": I}, ("attachment_index",)),
+    definition("apply_csv", "Atomically apply a supplied CSV attachment through the store. Specify object_type, create/update/upsert mode and identity property; ask if unclear. Any invalid row rolls back the whole batch.", {"attachment_index": I, "object_type": S, "mode": {"type": "string", "enum": ["create", "update", "upsert"]}, "id_property": S}, ("attachment_index", "object_type", "mode", "id_property")),
 ]
+WRITE_TOOLS = {"create_record", "update_record", "archive_record", "associate", "apply_csv"}
+_WRITE_INTENT = re.compile(r"\b(segn\w*|spost\w*|cre\w*|aggiorn\w*|modific\w*|assegn\w*|associ\w*|archivi\w*|elimin\w*|cancell\w*|import\w*|caric\w*|aggiung\w*|chiud\w*|vinta|persa|metti|porta|imposta|registra|collega|apri|inserisci|scrivi|mark|update|create|assign|archive|delete|associate|import|add|set|close)\b", re.I)
 
 
-class Session:
-    def __init__(self, context):
-        self.context = context
-        self.seen = set()
-        self.writes = []
-        self.ambiguous = set()
-        self.now = None
-        if context.get("now"):
-            self.now = datetime.fromisoformat(str(context["now"]).replace("Z", "+00:00"))
-            if self.now.tzinfo is None:
-                raise ApiError(400, "context.now deve includere il fuso orario")
+@dataclass
+class RunState:
+    user: str
+    now: datetime | None
+    user_text: str
+    attachments: list[dict] = field(default_factory=list)
+    allow_writes: bool = False
+    sources: list[str] = field(default_factory=list)
+    records: dict[tuple[str, str], dict] = field(default_factory=dict)
+    ambiguous: set[tuple[str, str]] = field(default_factory=set)
+    actions: list[dict] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
-    async def record(self, conn, otype, ident, id_property=None):
-        row = await store.get(conn, otype, ident, id_property)
-        oid = str(row["id"])
-        self.seen.add((otype, oid))
-        assocs = await store.assoc_rows(conn, int(oid))
-        targets = sorted({(a["to_type"], a["to_id"]) for a in assocs})
-        linked = await conn.fetch("SELECT * FROM objects WHERE id=ANY($1::bigint[]) AND NOT archived ORDER BY id LIMIT 100",
-                                  list({i for _, i in targets})) if targets else []
-        return {"id": oid, "object_type": otype, "properties": row["properties"],
-                "associations": [{"object_type": t, "id": str(i)} for t, i in targets[:100]],
-                "association_count": len(targets), "associated_records": [
-                    {"id": str(r["id"]), "object_type": r["object_type"], "properties": r["properties"]} for r in linked]}
+    def remember_record(self, item: dict, ambiguous: bool = False) -> None:
+        key = (item["object_type"], str(item["id"]))
+        self.records[key] = item
+        source = f"{key[0]}:{key[1]}"
+        if source not in self.sources:
+            self.sources.append(source)
+        if ambiguous:
+            self.ambiguous.add(key)
 
-    def require_seen(self, otype, ident):
-        if (otype, str(ident)) not in self.seen:
-            raise ApiError(400, "Leggi prima il record con get_record; non inventare ID")
+    def remember_document(self, document: dict) -> None:
+        source = f"{document['doc_id']}@{document['revision']}"
+        if source not in self.sources:
+            self.sources.append(source)
 
-    async def users(self, conn, query=""):
-        if not await conn.fetchval("SELECT to_regclass('public.agent_users')"):
-            return []
-        return [dict(r) for r in await conn.fetch(
-            "SELECT legacy_id,email,name,active FROM agent_users WHERE $1='' OR name ILIKE '%'||$1||'%' "
-            "OR email ILIKE '%'||$1||'%' OR legacy_id=$1 ORDER BY name LIMIT 100", query)]
+    def require_record(self, object_type: str, identifier) -> None:
+        key = (store.resolve_type(object_type), str(identifier))
+        if key not in self.records or key in self.ambiguous:
+            raise ApiError(400, "Resolve the exact record first; ambiguous targets require user clarification")
 
-    async def assignments(self, conn, props):
-        for key in ("commerciale", "assegnatario", "autore"):
-            if props.get(key):
-                matches = await self.users(conn, str(props[key]))
-                exact = [u for u in matches if str(props[key]).casefold() in
-                         (u["email"].casefold(), u["name"].casefold(), u["legacy_id"].casefold())]
-                if len(exact) != 1 or not exact[0]["active"]:
-                    raise ApiError(400, f"{key}: utente non trovato, ambiguo o non più attivo. Nessuna modifica eseguita.")
-                props[key] = exact[0]["email"]
+    def attachment(self, index: int) -> dict:
+        if not isinstance(index, int) or index < 0 or index >= len(self.attachments):
+            raise ApiError(400, "Attachment index not found")
+        attachment = self.attachments[index]
+        if attachment.get("content_type", "text/csv") != "text/csv" or not isinstance(attachment.get("content"), str):
+            raise ApiError(400, "Only supplied text/csv attachments can be applied")
+        return attachment
 
-    async def execute(self, name, args):
-        async with db.pool.acquire() as conn:
-            if name == "list_users":
-                return {"users": await self.users(conn, args.get("query", ""))}
-            if name == "associate":
-                ft, tt = store.resolve_type(args["from_type"]), store.resolve_type(args["to_type"])
-                self.require_seen(ft, args["from_id"]); self.require_seen(tt, args["to_id"])
-                async with conn.transaction():
-                    await store.associate(conn, ft, int(args["from_id"]), tt, int(args["to_id"]))
-                    result = await self.record(conn, ft, args["from_id"])
-                self.writes.append({"operation": name, "record": result})
-                return result
-            if name == "company_revenue":
-                cid, year = str(args["company_id"]), int(args["year"])
-                company = await self.record(conn, "companies", cid)
-                if year == 2025 and company["properties"].get("fatturato_2025") is not None:
-                    return {"company": company["properties"].get("name"), "year": year,
-                            "revenue_eur": company["properties"]["fatturato_2025"], "source": "fatturato_2025"}
-                rows = await conn.fetch(
-                    "SELECT o.properties FROM objects o JOIN pipeline_stages s ON s.object_type='deals' "
-                    "AND s.pipeline_id=o.properties->>'pipeline' AND s.id=o.properties->>'dealstage' "
-                    "WHERE o.object_type='deals' AND NOT o.archived AND s.metadata->>'probability'='1.0' "
-                    "AND substring(o.properties->>'closedate',1,4)=$2 AND EXISTS "
-                    "(SELECT 1 FROM associations a WHERE a.from_id=o.id AND a.to_type='companies' AND a.to_id=$1)", int(cid), str(year))
-                total = Decimal(0)
-                for row in rows:
-                    p = row["properties"]
-                    amount = Decimal(p.get("amount") or "0")
-                    if "storno" in p.get("dealname", "").casefold():
-                        amount = -abs(amount)
-                    total += amount * {"EUR": Decimal(1), "USD": Decimal("0.92"), "GBP": Decimal("1.17")}.get(p.get("deal_currency_code") or "EUR", Decimal(1))
-                return {"year": year, "revenue_eur": str(total.quantize(Decimal("0.01"))), "deal_count": len(rows)}
-            ot = store.resolve_type(args["object_type"])
-            if name == "get_record":
-                return await self.record(conn, ot, args["id"], args.get("id_property"))
-            if name == "list_pipelines":
-                pipelines = await conn.fetch("SELECT id,label FROM pipelines WHERE object_type=$1 AND NOT archived ORDER BY display_order", ot)
-                return {"pipelines": [{**dict(p), "stages": [dict(s) for s in await conn.fetch(
-                    "SELECT id,label,metadata FROM pipeline_stages WHERE object_type=$1 AND pipeline_id=$2 AND NOT archived ORDER BY display_order", ot, p["id"])]} for p in pipelines]}
-            if name == "list_properties":
-                return {"properties": [dict(r) for r in await conn.fetch(
-                    "SELECT name,label,type,options,read_only FROM property_defs WHERE object_type=$1 AND NOT archived ORDER BY name", ot)]}
-            if name == "search_records":
-                body = {k: v for k, v in args.items() if k not in ("object_type", "my_customers")}
-                body["limit"] = min(int(body.get("limit") or 20), 50)
-                if args.get("my_customers"):
-                    if ot != "companies" or not self.context.get("user"):
-                        raise ApiError(400, "Per i miei clienti serve context.user e object_type companies")
-                    ids = await conn.fetch(
-                        "SELECT DISTINCT a.to_id FROM associations a JOIN objects o ON o.id=a.from_id "
-                        "WHERE a.to_type='companies' AND NOT o.archived AND "
-                        "((o.object_type='deals' AND lower(o.properties->>'commerciale')=lower($1)) OR "
-                        "(o.object_type='tickets' AND lower(o.properties->>'assegnatario')=lower($1)))", self.context["user"])
-                    f = {"propertyName": "hs_object_id", "operator": "IN", "values": [str(r["to_id"]) for r in ids]}
-                    body["filterGroups"] = [{"filters": g.get("filters", [])+[f]} for g in body.get("filterGroups") or [{}]]
-                rows, total, after = await search.search(conn, ot, body)
-                results = [{"id": str(r["id"]), "properties": r["properties"]} for r in rows]
-                # Names may match multiple records; the model must ask before choosing.
-                if total > 1 and body.get("query"):
-                    self.ambiguous.update((ot, r["id"]) for r in rows)
-                return {"results": results, "total": total, "after": str(after) if after is not None else None}
-            if name not in ("create_record", "update_record"):
-                raise ApiError(400, "Strumento sconosciuto")
-            props = dict(args["properties"])
-            await self.assignments(conn, props)
-            extra = {"effective_now": self.now} if "effective_now" in inspect.signature(store.create).parameters else {}
-            async with conn.transaction():
-                if name == "update_record":
-                    self.require_seen(ot, args["id"])
-                    before = await store.get(conn, ot, args["id"])
-                    row = await store.update(conn, ot, args["id"], props, **extra)
-                else:
-                    before = None
-                    assocs = []
-                    for a in args.get("associations") or []:
-                        tt = store.resolve_type(a["object_type"])
-                        self.require_seen(tt, a["id"])
-                        assocs.append((tt, int(a["id"]), None))
-                    row = await store.create(conn, ot, props, assocs or None, **extra)
-                result = await self.record(conn, ot, row["id"])
-                result["changes"] = {k: {"before": before["properties"].get(k) if before else None,
-                                         "after": result["properties"].get(k)} for k in props}
-            self.writes.append({"operation": name, "record": result})
+
+def write_intent(messages: list[dict]) -> bool:
+    user_messages = [str(m.get("content") or "") for m in messages if m.get("role") == "user"]
+    if not user_messages:
+        return False
+    latest = user_messages[-1]
+    if _WRITE_INTENT.search(latest):
+        return True
+    # Permit a clarification reply only following an earlier action request.
+    clarification = re.fullmatch(r"\s*(s[iì]|ok|conferm\w*|quell\w*|la\s+\w+|il\s+\w+|[\w.@+-]+)\s*[.!]?\s*", latest, re.I)
+    return bool(clarification and any(_WRITE_INTENT.search(text) for text in user_messages[:-1]))
+
+
+async def execute_tool(name: str, args: dict, state: RunState) -> Any:
+    if name not in {t["function"]["name"] for t in TOOL_DEFINITIONS}:
+        raise ApiError(400, f"Unknown tool {name}")
+    if name == "preview_csv":
+        attachment = state.attachment(args["attachment_index"])
+        columns, rows = csv_import.parse(attachment["content"])
+        return {"name": attachment.get("name"), "columns": columns, "total": len(rows), "preview": rows[:5]}
+    if db.pool is None:
+        raise ApiError(503, "CRM database unavailable")
+    async with db.pool.acquire() as conn:
+        if name in WRITE_TOOLS:
+            if not state.allow_writes:
+                raise ApiError(400, "The conversation does not authorize a CRM action")
+            if not state.now:
+                raise ApiError(400, "context.now is required for CRM actions")
+            if not await conn.fetchval("SELECT EXISTS(SELECT 1 FROM agent_users WHERE lower(email)=lower($1) AND active)", state.user):
+                raise ApiError(400, "context.user must be an imported active employee")
+            return await _write(conn, name, args, state)
+        if name == "list_kb_documents":
+            return {"documents": await kb.list_documents(conn)}
+        if name == "search_knowledge_base":
+            docs = await kb.search_documents(conn, args["query"], args.get("max_results", 4))
+            for doc in docs:
+                state.remember_document(doc)
+            return {"documents": docs}
+        if name == "get_kb_document":
+            doc = await kb.get_document(conn, args["doc_id"], args.get("revision"))
+            state.remember_document(doc)
+            return doc
+        if name == "get_related_knowledge":
+            result = await kb.related_knowledge(conn, args["object_type"], int(args["id"]), args.get("depth", 2))
+            for doc in result["documents"]:
+                state.remember_document(doc)
+            # Graph identity does not authorize a write; use precise record tools.
+            result["records"] = [{"id": r["id"], "object_type": r["object_type"],
+                                  "label": r["properties"].get("name") or r["properties"].get("dealname") or r["properties"].get("subject"),
+                                  "updated_at": r["updated_at"]} for r in result["records"]]
             return result
+        if name == "search_records":
+            result = await read.search_records(conn, args["object_type"], args, state.user)
+            for row in result["records"]:
+                state.remember_record(row, ambiguous=result["total"] > 1)
+                if result["total"] == 1:
+                    state.ambiguous.discard((row["object_type"], row["id"]))
+            return result
+        if name == "get_record":
+            row = await read.get_record(conn, args["object_type"], args["id"], args.get("id_property"))
+            state.remember_record(row)
+            # An explicit identifier in the user's request disambiguates a target.
+            if str(args["id"]).lower() in state.user_text.lower():
+                state.ambiguous.discard((row["object_type"], row["id"]))
+            return row
+        if name in ("get_related_records", "get_activity_history"):
+            result = await read.related_records(conn, args["object_type"], args["id"], args.get("target_type"),
+                                                args.get("after", 0), args.get("limit", 50), name == "get_activity_history")
+            for row in result["records"]:
+                state.remember_record(row, ambiguous=result["total"] > 1)
+            return result
+        if name == "list_pipelines":
+            return await read.metadata(conn, args["object_type"])
+        if name == "list_users":
+            return {"users": await read.list_users(conn, args.get("query", ""), args.get("active_only", False))}
+        if name == "aggregate_records":
+            result = await read.aggregate_records(conn, args["object_type"], args, state.user)
+            state.sources.append(f"{store.resolve_type(args['object_type'])}:aggregate")
+            return result
+    raise ApiError(400, f"Unimplemented tool {name}")
+
+
+async def _write(conn, name: str, args: dict, state: RunState) -> dict:
+    action = {"operation": name}
+    async with conn.transaction():
+        if name == "apply_csv":
+            attachment = state.attachment(args["attachment_index"])
+            rows = await csv_import.apply(conn, args["object_type"], attachment["content"], args["mode"], args["id_property"], state.now)
+            result = {"records": rows, "count": len(rows), "verified": True}
+            action["count"] = len(rows)
+        elif name == "associate":
+            ft, tt = store.resolve_type(args["from"]["object_type"]), store.resolve_type(args["to"]["object_type"])
+            fid, tid = int(args["from"]["id"]), int(args["to"]["id"])
+            state.require_record(ft, fid)
+            state.require_record(tt, tid)
+            types = None
+            if "association_type_id" in args:
+                type_id = int(args["association_type_id"])
+                if not any(t["from"] == ft and t["to"] == tt and t["type_id"] == type_id for t in ASSOC_TYPES):
+                    raise ApiError(400, "Association type does not match these object types")
+                types = [("HUBSPOT_DEFINED", type_id)]
+            await store.associate(conn, ft, fid, tt, tid, types)
+            row = await read.get_record(conn, ft, fid)
+            result = {"record": row, "verified": any(r["to_id"] == tid for r in row["associations"])}
+            action.update(object_type=ft, id=str(fid), changes={"associated_to": f"{tt}:{tid}"})
+        else:
+            object_type = store.resolve_type(args["object_type"])
+            if name == "archive_record":
+                state.require_record(object_type, args["id"])
+                await store.archive(conn, object_type, args["id"])
+                row = await store.get(conn, object_type, args["id"], archived=True)
+                result = {"record": read.record(row), "verified": row["archived"]}
+                action.update(object_type=object_type, id=str(row["id"]), changes={"archived": True})
+            else:
+                props = await csv_import.normalize_properties(conn, object_type, args["properties"])
+                if name == "update_record":
+                    state.require_record(object_type, args["id"])
+                    row = await store.update(conn, object_type, args["id"], props, effective_now=state.now)
+                else:
+                    associations = []
+                    for target in args.get("associations", []):
+                        target_type = store.resolve_type(target["object_type"])
+                        state.require_record(target_type, target["id"])
+                        associations.append((target_type, int(target["id"]), None))
+                    row = await store.create(conn, object_type, props, associations or None, effective_now=state.now)
+                current = await read.get_record(conn, object_type, row["id"])
+                result = {"record": current, "verified": True}
+                if object_type == "deals":
+                    result["automation_records"] = []
+                    for target_type in ("tickets", "tasks"):
+                        linked = await read.related_records(conn, object_type, row["id"], target_type)
+                        result["automation_records"].extend(linked["records"])
+                action.update(object_type=object_type, id=str(row["id"]),
+                              changes={key: current["properties"].get(key) for key in props})
+    # Record only committed actions; failed CSV batches never reach this line.
+    state.actions.append(action)
+    for row in result.get("records", []) + ([result["record"]] if "record" in result else []) + result.get("automation_records", []):
+        state.remember_record(row)
+    return result

@@ -30,6 +30,7 @@ ASSOC_WORKERS = 3
 
 
 async def load_objects(conn, res: dict, base: int) -> None:
+    await store.replace_agent_users(conn, res.get("users", []))
     now = store.utcnow()
     now_iso = store.iso(now)
     by_local: dict[int, dict] = {}
@@ -78,6 +79,7 @@ async def run(pool, zip_bytes: bytes, started: float | None = None) -> dict:
         async with conn.transaction():
             ids = await setup.ensure(conn)
         res = await asyncio.to_thread(transform, data, ids, decisions["company_links"])
+        res["users"] = data.get("utenti", [])
         try:
             cross = audit.cross_check(rules, res, decisions["company_links"])
         except Exception as e:  # the audit never blocks a migration

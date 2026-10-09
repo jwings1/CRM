@@ -12,10 +12,11 @@ from .defaults import DEFAULT_PIPELINES, OBJECT_TYPES, property_rows
 pool: asyncpg.Pool | None = None
 
 SCHEMA = (pathlib.Path(__file__).parent / "schema.sql").read_text()
+KB_SCHEMA = (pathlib.Path(__file__).parent / "agent" / "kb_schema.sql").read_text()
 
 TABLES = (
     "objects, associations, unique_values, property_groups, property_defs, pipelines, "
-    "pipeline_stages, lists, list_memberships, automation_log, exports"
+    "pipeline_stages, lists, list_memberships, automation_log, exports, kb_document_links, agent_users"
 )
 
 
@@ -57,9 +58,12 @@ async def connect() -> asyncpg.Pool:
         await conn.execute("SELECT pg_advisory_lock(424242)")
         try:
             await conn.execute(SCHEMA)
+            await conn.execute(KB_SCHEMA)
             if not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM property_defs)"):
                 async with conn.transaction():
                     await seed(conn)
+            from .agent.kb import seed_documents
+            await seed_documents(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(424242)")
     return pool

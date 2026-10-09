@@ -1,0 +1,331 @@
+{
+  "documents": [
+    {
+      "doc_id": "BKB-R01",
+      "title": "R1. Le aziende",
+      "category": "business_rule",
+      "source": "starter/starter-v9/legacy/RICHIESTE.md#R1",
+      "file": "BKB-R01.md",
+      "metadata": {
+        "object_types": [
+          "companies"
+        ],
+        "aliases": [
+          "aziende",
+          "clienti",
+          "dominio",
+          "duplicati"
+        ],
+        "tags": [
+          "R1"
+        ]
+      }
+    },
+    {
+      "doc_id": "BKB-R02",
+      "title": "R2. Le persone",
+      "category": "business_rule",
+      "source": "starter/starter-v9/legacy/RICHIESTE.md#R2",
+      "file": "BKB-R02.md",
+      "metadata": {
+        "object_types": [
+          "contacts"
+        ],
+        "aliases": [
+          "persone",
+          "contatti",
+          "email",
+          "fase rapporto"
+        ],
+        "tags": [
+          "R2"
+        ]
+      }
+    },
+    {
+      "doc_id": "BKB-R03",
+      "title": "R3. Le trattative",
+      "category": "business_rule",
+      "source": "starter/starter-v9/legacy/RICHIESTE.md#R3",
+      "file": "BKB-R03.md",
+      "metadata": {
+        "object_types": [
+          "deals"
+        ],
+        "aliases": [
+          "trattative",
+          "opportunità",
+          "commerciale",
+          "rinnovi",
+          "assegnazione"
+        ],
+        "tags": [
+          "R3"
+        ]
+      }
+    },
+    {
+      "doc_id": "BKB-R04",
+      "title": "R4. Listino e offerte",
+      "category": "business_rule",
+      "source": "starter/starter-v9/legacy/RICHIESTE.md#R4",
+      "file": "BKB-R04.md",
+      "metadata": {
+        "object_types": [
+          "products",
+          "line_items",
+          "deals"
+        ],
+        "aliases": [
+          "listino",
+          "prezzo",
+          "prodotti",
+          "offerta",
+          "sconto"
+        ],
+        "tags": [
+          "R4"
+        ]
+      }
+    },
+    {
+      "doc_id": "BKB-R05",
+      "title": "R5. L'assistenza",
+      "category": "business_rule",
+      "source": "starter/starter-v9/legacy/RICHIESTE.md#R5",
+      "file": "BKB-R05.md",
+      "metadata": {
+        "object_types": [
+          "tickets"
+        ],
+        "aliases": [
+          "assistenza",
+          "ticket",
+          "assegnatario",
+          "priorità"
+        ],
+        "tags": [
+          "R5"
+        ]
+      }
+    },
+    {
+      "doc_id": "BKB-R06",
+      "title": "R6. Lo storico",
+      "category": "business_rule",
+      "source": "starter/starter-v9/legacy/RICHIESTE.md#R6",
+      "file": "BKB-R06.md",
+      "metadata": {
+        "object_types": [
+          "notes",
+          "calls",
+          "emails",
+          "meetings"
+        ],
+        "aliases": [
+          "storico",
+          "attività",
+          "chiamate",
+          "note",
+          "email",
+          "riunioni"
+        ],
+        "tags": [
+          "R6"
+        ]
+      }
+    },
+    {
+      "doc_id": "BKB-R07",
+      "title": "R7. La partita IVA",
+      "category": "business_rule",
+      "source": "starter/starter-v9/legacy/RICHIESTE.md#R7",
+      "file": "BKB-R07.md",
+      "metadata": {
+        "object_types": [
+          "companies"
+        ],
+        "aliases": [
+          "partita iva",
+          "piva",
+          "unicità",
+          "duplicato"
+        ],
+        "tags": [
+          "R7"
+        ]
+      }
+    },
+    {
+      "doc_id": "BKB-R08",
+      "title": "R8. Il fatturato 2025 e la classe del cliente",
+      "category": "business_rule",
+      "source": "starter/starter-v9/legacy/RICHIESTE.md#R8",
+      "file": "BKB-R08.md",
+      "metadata": {
+        "object_types": [
+          "companies",
+          "deals"
+        ],
+        "aliases": [
+          "fatturato",
+          "ricavi",
+          "classe cliente",
+          "euro",
+          "storno"
+        ],
+        "tags": [
+          "R8"
+        ]
+      }
+    },
+    {
+      "doc_id": "BKB-R09",
+      "title": "R9. I clienti dormienti",
+      "category": "business_rule",
+      "source": "starter/starter-v9/legacy/RICHIESTE.md#R9",
+      "file": "BKB-R09.md",
+      "metadata": {
+        "object_types": [
+          "companies",
+          "contacts",
+          "deals",
+          "notes",
+          "calls",
+          "emails",
+          "meetings"
+        ],
+        "aliases": [
+          "clienti dormienti",
+          "inattività"
+        ],
+        "tags": [
+          "R9"
+        ]
+      }
+    },
+    {
+      "doc_id": "BKB-R10",
+      "title": "R10. Trattativa vinta, si apre l'avvio fornitura",
+      "category": "business_rule",
+      "source": "starter/starter-v9/legacy/RICHIESTE.md#R10",
+      "file": "BKB-R10.md",
+      "metadata": {
+        "object_types": [
+          "deals",
+          "tickets"
+        ],
+        "aliases": [
+          "vinta",
+          "vinto",
+          "avvio fornitura",
+          "ordine firmato"
+        ],
+        "tags": [
+          "R10"
+        ]
+      }
+    },
+    {
+      "doc_id": "BKB-R11",
+      "title": "R11. Trattativa persa, si richiama tra sei mesi",
+      "category": "business_rule",
+      "source": "starter/starter-v9/legacy/RICHIESTE.md#R11",
+      "file": "BKB-R11.md",
+      "metadata": {
+        "object_types": [
+          "deals",
+          "tasks"
+        ],
+        "aliases": [
+          "persa",
+          "perso",
+          "perdo",
+          "richiamare",
+          "sei mesi",
+          "180 giorni"
+        ],
+        "tags": [
+          "R11"
+        ]
+      }
+    },
+    {
+      "doc_id": "BKB-R12",
+      "title": "R12. Il contatto trova la sua azienda",
+      "category": "business_rule",
+      "source": "starter/starter-v9/legacy/RICHIESTE.md#R12",
+      "file": "BKB-R12.md",
+      "metadata": {
+        "object_types": [
+          "contacts",
+          "companies"
+        ],
+        "aliases": [
+          "associazione automatica",
+          "dominio email"
+        ],
+        "tags": [
+          "R12"
+        ]
+      }
+    },
+    {
+      "doc_id": "BKB-R13",
+      "title": "R13. Chiediamo al CRM, in italiano",
+      "category": "business_rule",
+      "source": "starter/starter-v9/legacy/RICHIESTE.md#R13",
+      "file": "BKB-R13.md",
+      "metadata": {
+        "object_types": [],
+        "aliases": [
+          "assistente",
+          "miei clienti",
+          "ambiguità",
+          "regole"
+        ],
+        "tags": [
+          "R13"
+        ]
+      }
+    },
+    {
+      "doc_id": "BKB-GENERAL",
+      "title": "Regole generali e nomi del CRM",
+      "category": "data_reference",
+      "source": "starter/starter-v9/legacy/RICHIESTE.md#Allegato",
+      "file": "BKB-GENERAL.md",
+      "metadata": {
+        "object_types": [],
+        "aliases": [
+          "glossario",
+          "pipeline",
+          "fasi",
+          "proprietà",
+          "Sinergia",
+          "nomi",
+          "codici"
+        ]
+      }
+    },
+    {
+      "doc_id": "BKB-CONTEXT",
+      "title": "Contesto e conversazioni dell’assistente",
+      "category": "assistant_reference",
+      "source": "starter/starter-v9/BRIEF.md#The-contract",
+      "file": "BKB-CONTEXT.md",
+      "metadata": {
+        "object_types": [],
+        "aliases": [
+          "contesto",
+          "oggi",
+          "utente",
+          "miei clienti",
+          "allegati",
+          "data",
+          "CSV"
+        ]
+      }
+    }
+  ]
+}

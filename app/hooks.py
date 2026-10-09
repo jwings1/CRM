@@ -13,9 +13,10 @@ from . import store
 SALES_PIPELINE = "default"
 
 
-async def after_write(conn, otype: str, oid: int, before: dict | None, after: dict, *, created: bool) -> None:
+async def after_write(conn, otype: str, oid: int, before: dict | None, after: dict, *, created: bool,
+                      effective_now=None) -> None:
     if otype == "deals":
-        await _deal_rules(conn, oid, before, after, created)
+        await _deal_rules(conn, oid, before, after, created, effective_now)
     elif otype == "contacts":
         await _r12(conn, oid, before, after, created)
 
@@ -33,11 +34,11 @@ async def _once(conn, rule: str, oid: int) -> bool:
         "INSERT INTO automation_log (rule, object_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING 1", rule, oid))
 
 
-async def _deal_rules(conn, oid, before, after, created) -> None:
+async def _deal_rules(conn, oid, before, after, created, effective_now=None) -> None:
     if _entered(before, after, created, "closedwon") and await _once(conn, "R10", oid):
         await _r10(conn, oid, after)
     if _entered(before, after, created, "closedlost") and await _once(conn, "R11", oid):
-        await _r11(conn, oid, after)
+        await _r11(conn, oid, after, effective_now)
 
 
 async def _assistenza(conn) -> tuple[str, str]:
@@ -68,10 +69,10 @@ async def _r10(conn, oid: int, deal: dict) -> None:
     await store.create(conn, "tickets", props, assocs, validate=False, run_hooks=False)
 
 
-async def _r11(conn, oid: int, deal: dict) -> None:
+async def _r11(conn, oid: int, deal: dict, effective_now=None) -> None:
     props = {
         "hs_task_subject": f"Richiamare: {deal.get('dealname') or ''}",
-        "hs_timestamp": store.days_from(store.utcnow(), 180),
+        "hs_timestamp": store.days_from(effective_now or store.utcnow(), 180),
         "hs_task_status": "NOT_STARTED",
         "hs_task_type": "CALL",
     }

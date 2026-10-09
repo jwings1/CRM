@@ -370,7 +370,7 @@ def parse_assoc_input(otype: str, items: list | None) -> list[tuple[str, int, li
 # ---------------------------------------------------------------- writes
 
 async def create(conn, otype: str, properties: dict | None, associations: list | None = None, *,
-                 validate: bool = True, run_hooks: bool = True):
+                 validate: bool = True, run_hooks: bool = True, effective_now: datetime | None = None):
     """associations: HubSpot body format, or [(to_type, to_id, [(cat, typeId)])]."""
     from . import hooks
     props, uniques = await prepare(conn, otype, properties, validate=validate)
@@ -405,14 +405,15 @@ async def create(conn, otype: str, properties: dict | None, associations: list |
                     raise ApiError(400, "Invalid association type for " + otype)
                 await associate(conn, otype, oid, to_type, int(to_id), types or None)
         if run_hooks:
-            await hooks.after_write(conn, otype, oid, None, row["properties"], created=True)
+            await hooks.after_write(conn, otype, oid, None, row["properties"], created=True,
+                                    effective_now=effective_now)
             if otype in ("deals", "contacts"):
                 row = await conn.fetchrow("SELECT * FROM objects WHERE id=$1", oid)
     return row
 
 
 async def update(conn, otype: str, id_value, properties: dict | None, *, id_property: str | None = None,
-                 validate: bool = True, run_hooks: bool = True):
+                 validate: bool = True, run_hooks: bool = True, effective_now: datetime | None = None):
     from . import hooks
     props, uniques = await prepare(conn, otype, properties, validate=validate)
     async with conn.transaction():
@@ -434,7 +435,8 @@ async def update(conn, otype: str, id_value, properties: dict | None, *, id_prop
         except asyncpg.UniqueViolationError:
             raise ApiError(409, "Contact already exists with this email", "CONFLICT")
         if run_hooks:
-            await hooks.after_write(conn, otype, oid, before, row["properties"], created=False)
+            await hooks.after_write(conn, otype, oid, before, row["properties"], created=False,
+                                    effective_now=effective_now)
             if otype in ("deals", "contacts"):
                 row = await conn.fetchrow("SELECT * FROM objects WHERE id=$1", oid)
     return row
@@ -466,3 +468,108 @@ async def reserve_ids(conn, n: int) -> range:
 
 def days_from(dt: datetime, days: int) -> str:
     return iso(dt + timedelta(days=days))
+
+
+# ---------------------------------------------------------------- company knowledge writes
+
+async def publish_kb_document(conn, document: dict, *, expected_revision: int = 0,
+                              only_if_missing: bool = False):
+    """Publish a document, links, search vector and immutable revision in one transaction.
+
+    expected_revision=0 means create. Existing documents require their last observed
+    revision. Startup seeds use only_if_missing and never overwrite production edits.
+    """
+    import hashlib
+    import json
+
+    doc_id = str(document.get("doc_id") or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9_.-]{0,127}", doc_id):
+        raise ApiError(400, "Invalid knowledge document ID")
+    values = {key: str(document.get(key) or "").strip()
+              for key in ("title", "category", "content", "source")}
+    if any(not value for value in values.values()):
+        raise ApiError(400, "Knowledge documents require title, category, content and source")
+    metadata = dict(document.get("metadata") or {})
+    for key in ("aliases", "object_types", "tags"):
+        if key in metadata and (not isinstance(metadata[key], list)
+                                or any(not isinstance(v, str) for v in metadata[key])):
+            raise ApiError(400, f"Document metadata {key} must be a list of strings")
+    links = sorted({(int(link["object_id"]), str(link.get("relation") or "mentions"))
+                    for link in document.get("links", [])})
+    metadata["record_links"] = [{"object_id": str(oid), "relation": relation} for oid, relation in links]
+    archived = bool(document.get("archived", False))
+    payload = {**values, "metadata": metadata, "archived": archived}
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                      separators=(",", ":")).encode()).hexdigest()
+    async with conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(434343, hashtext($1))", doc_id)
+        current = await conn.fetchrow("SELECT * FROM kb_documents WHERE doc_id=$1 FOR UPDATE", doc_id)
+        if current and only_if_missing:
+            return current
+        revision = current["revision"] if current else 0
+        if revision != expected_revision:
+            raise ApiError(409, f"Document {doc_id} revision changed: expected {expected_revision}, current {revision}", "CONFLICT")
+        if current and current["content_hash"] == digest:
+            return current
+        if links:
+            live = set(await conn.fetchval(
+                "SELECT coalesce(array_agg(id), '{}'::bigint[]) FROM objects WHERE id=ANY($1::bigint[]) AND NOT archived",
+                [oid for oid, _ in links]))
+            if any(oid not in live for oid, _ in links):
+                raise ApiError(404, "A knowledge link references a missing or archived CRM record", "OBJECT_NOT_FOUND")
+        aliases = " ".join(metadata.get("aliases", []))
+        row = await conn.fetchrow(
+            "INSERT INTO kb_documents (doc_id,title,category,content,source,metadata,revision,content_hash,archived,search_vector) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, "
+            "setweight(to_tsvector('italian', $2), 'A') || setweight(to_tsvector('italian', $10), 'B') || "
+            "setweight(to_tsvector('italian', $4), 'D')) "
+            "ON CONFLICT (doc_id) DO UPDATE SET title=EXCLUDED.title, category=EXCLUDED.category, "
+            "content=EXCLUDED.content, source=EXCLUDED.source, metadata=EXCLUDED.metadata, revision=EXCLUDED.revision, "
+            "content_hash=EXCLUDED.content_hash, archived=EXCLUDED.archived, updated_at=now(), search_vector=EXCLUDED.search_vector "
+            "RETURNING *", doc_id, values["title"], values["category"], values["content"], values["source"],
+            metadata, revision + 1, digest, archived, aliases)
+        await conn.execute(
+            "INSERT INTO kb_document_versions (doc_id,revision,title,category,content,source,metadata,content_hash,archived) "
+            "SELECT doc_id,revision,title,category,content,source,metadata,content_hash,archived FROM kb_documents WHERE doc_id=$1",
+            doc_id)
+        await conn.execute("DELETE FROM kb_document_links WHERE doc_id=$1", doc_id)
+        if links:
+            await conn.executemany("INSERT INTO kb_document_links (doc_id,object_id,relation) VALUES ($1,$2,$3)",
+                                   [(doc_id, oid, relation) for oid, relation in links])
+        return row
+
+
+async def change_kb_document(conn, doc_id: str, *, expected_revision: int,
+                             archived: bool | None = None, link: dict | None = None):
+    row = await conn.fetchrow("SELECT * FROM kb_documents WHERE doc_id=$1", doc_id.upper())
+    if row is None:
+        raise ApiError(404, f"Knowledge document {doc_id} not found", "OBJECT_NOT_FOUND")
+    document = {key: row[key] for key in ("doc_id", "title", "category", "content", "source", "metadata", "archived")}
+    # Use live links: reset may have removed IDs recorded in historical metadata.
+    document["links"] = [dict(r) for r in await conn.fetch(
+        "SELECT l.object_id,l.relation FROM kb_document_links l JOIN objects o ON o.id=l.object_id "
+        "WHERE l.doc_id=$1 AND NOT o.archived", row["doc_id"])]
+    if archived is not None:
+        document["archived"] = archived
+    if link is not None:
+        document["links"].append(link)
+    return await publish_kb_document(conn, document, expected_revision=expected_revision)
+
+
+async def replace_agent_users(conn, users: list[dict]) -> None:
+    """Persist employee metadata from the same export that populates the CRM."""
+    from .migrate import normalize
+    rows = {}
+    for user in users:
+        uid = str(user.get("id_utente") or "").strip()
+        if not uid:
+            continue
+        rows[uid] = (uid, (user.get("email") or "").strip().lower(),
+                     " ".join((user.get(key) or "").strip() for key in ("nome", "cognome")).strip(),
+                     normalize.is_active(user.get("attivo")),
+                     {"role": (user.get("ruolo") or "").strip(), "manager": (user.get("responsabile") or "").strip()})
+    async with conn.transaction():
+        await conn.execute("DELETE FROM agent_users")
+        if rows:
+            await conn.executemany("INSERT INTO agent_users (legacy_id,email,name,active,metadata) VALUES ($1,$2,$3,$4,$5)",
+                                   list(rows.values()))
