@@ -76,7 +76,7 @@
   /* ---------- api ---------- */
   function api(path, opts) {
     opts = opts || {};
-    var tok = store.get('crm_token');
+    var tok = path === '/__agente' ? '' : store.get('crm_token');
     return fetch(tok ? path : '/ui-api' + path, {
       method: opts.method || 'GET',
       headers: Object.assign({ 'Content-Type': 'application/json' }, tok ? { Authorization: 'Bearer ' + tok } : {}),
@@ -549,8 +549,9 @@
   var chat = [];
   function openAssistant() {
     if (document.getElementById('assistant')) return;
-    if (!store.get('crm_token')) return askToken(openAssistant);
     var log = h('div', { class: 'body', 'aria-live': 'polite' });
+    var user = h('input', { id: 'assistant-user', type: 'email', placeholder: 'you@brambillaforniture.it', value: store.get('crm_user') });
+    user.addEventListener('change', function () { store.set('crm_user', user.value.trim()); });
     var input = h('textarea', { id: 'ask', rows: 2, placeholder: 'Write it the way you would to a colleague…' });
     var send = h('button', { class: 'btn primary', type: 'submit' }, 'Send');
     function draw() {
@@ -561,6 +562,7 @@
     function submit(e) {
       e.preventDefault();
       var text = input.value.trim(); if (!text) return;
+      store.set('crm_user', user.value.trim());
       chat.push({ role: 'user', content: text }); input.value = ''; send.disabled = true; draw();
       var pending = h('div', { class: 'msg bot small' }, 'Working…'); log.appendChild(pending);
       api('/__agente', { method: 'POST', body: { context: { now: new Date().toISOString(), user: store.get('crm_user') }, messages: chat } })
@@ -574,7 +576,8 @@
         h('button', { class: 'btn', type: 'button', onclick: function () { chat = []; draw(); } }, 'New'),
         h('button', { class: 'btn', type: 'button', 'aria-label': 'Close assistant', onclick: function () { document.getElementById('assistant').remove(); } }, 'Close')),
       log,
-      h('form', { onsubmit: submit }, h('label', { class: 'label', for: 'ask' }, 'Ask the CRM'), input, h('div', { class: 'row' }, h('span', { class: 'small grow' }, 'Follows the CRM rules'), send))));
+      h('form', { onsubmit: submit }, h('label', { class: 'label', for: 'assistant-user' }, 'Your email (optional, for “my customers”)'), user,
+        h('label', { class: 'label', for: 'ask' }, 'Ask the CRM'), input, h('div', { class: 'row' }, h('span', { class: 'small grow' }, 'Follows the CRM rules'), send))));
     draw(); input.focus();
   }
 

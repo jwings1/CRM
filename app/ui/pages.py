@@ -1,8 +1,7 @@
 """Interface (English). A static single-page app in app/ui/static/, served on the public UI routes.
 
-Browsers can't send the bearer token, so the page reads through /ui-api/*: a read-only proxy that forwards a short
-allowlist (GETs, searches, batch reads, list lookups) to the CRM itself. Anything else needs the real token, which the
-page asks for only when someone changes data (moving a deal, the assistant). No HubSpot name or logo anywhere."""
+The UI uses /ui-api/* to forward reads and assistant requests with the configured
+server token. Other writes still require a bearer token. No HubSpot name or logo anywhere."""
 from __future__ import annotations
 
 import re
@@ -53,7 +52,15 @@ async def asset(name: str):
 @router.api_route("/ui-api/{path:path}", methods=["GET", "POST"])
 async def read_proxy(path: str, request: Request):
     p = "/" + path
-    ok = (request.method == "GET" and _READ_GET.match(p)) or (request.method == "POST" and _READ_POST.match(p))
+    assistant = request.method == "POST" and p == "/__agente"
+    if assistant:
+        origin = request.headers.get("origin")
+        expected_origin = f"{request.url.scheme}://{request.url.netloc}"
+        if (origin and origin != expected_origin) or request.headers.get("sec-fetch-site") == "cross-site":
+            return Response(status_code=403)
+        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+            return Response(status_code=415)
+    ok = assistant or (request.method == "GET" and _READ_GET.match(p)) or (request.method == "POST" and _READ_POST.match(p))
     if not ok:
         return Response('{"status":"error","message":"Read-only endpoint","category":"INVALID_AUTHENTICATION"}',
                         status_code=401, media_type="application/json")
