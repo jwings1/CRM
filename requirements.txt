@@ -3,3 +3,4 @@ uvicorn[standard]==0.34.2
 asyncpg==0.30.0
 httpx==0.28.1
 orjson==3.10.18
+tzdata==2025.2

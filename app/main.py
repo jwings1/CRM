@@ -12,7 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config, db
 from .errors import ApiError, error_body, error_response
-from .routes import crm_meta, objects, system
+from .routes import crm_meta, lists, objects, system
 from .ui import pages
 
 log = logging.getLogger("crm")
@@ -99,4 +99,6 @@ for prefix in (f"/crm/properties/{config.API_VERSION}", "/crm/v3/properties"):
     app.include_router(crm_meta.properties_router, prefix=prefix)
 for prefix in (f"/crm/pipelines/{config.API_VERSION}", "/crm/v3/pipelines"):
     app.include_router(crm_meta.pipelines_router, prefix=prefix)
+for prefix in (f"/crm/lists/{config.API_VERSION}", "/crm/v3/lists"):
+    app.include_router(lists.router, prefix=prefix)
 app.include_router(pages.router)
