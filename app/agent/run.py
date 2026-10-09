@@ -90,8 +90,6 @@ def _finish(text: str, state: RunState) -> str:
         text = 'Non risultano modifiche verificate nel CRM. Serve completare o chiarire la richiesta.'
     if state.actions:
         text += '\n\nModifiche verificate:\n' + _action_summary(state)
-    if state.sources:
-        text += '\n\nFonti: ' + ', '.join(dict.fromkeys(state.sources)) + '.'
     return text.strip()
 
 

@@ -44,6 +44,7 @@ TOOL_DEFINITIONS = [
     definition("update_record", "Patch ONLY requested fields on a previously resolved record. Never select an arbitrary match. Read-back and automation outcomes are returned.", {"object_type": S, "id": S, "properties": O}, ("object_type", "id", "properties")),
     definition("archive_record", "Archive a previously resolved record ONLY when explicitly requested by the user.", REF["properties"], ("object_type", "id")),
     definition("associate", "Associate two previously verified records when the user requests it. Optional association_type_id must match the object types.", {"from": REF, "to": REF, "association_type_id": I}, ("from", "to")),
+    definition("get_dormant_customers", "Read the 'Clienti dormienti' list (R9): exact total and the member companies with name, id, revenue 2025 and class. Use for any question about dormant customers.", {"after": I, "limit": I}),
     definition("preview_csv", "Read a supplied CSV attachment by index, columns, row count and first rows. Never invent attachment content.", {"attachment_index": I}, ("attachment_index",)),
     definition("apply_csv", "Atomically apply a supplied CSV attachment through the store. Specify object_type, create/update/upsert mode and identity property; ask if unclear. Any invalid row rolls back the whole batch.", {"attachment_index": I, "object_type": S, "mode": {"type": "string", "enum": ["create", "update", "upsert"]}, "id_property": S}, ("attachment_index", "object_type", "mode", "id_property")),
 ]
@@ -122,6 +123,22 @@ async def execute_tool(name: str, args: dict, state: RunState) -> Any:
             if not await conn.fetchval("SELECT EXISTS(SELECT 1 FROM agent_users WHERE lower(email)=lower($1) AND active)", state.user):
                 raise ApiError(400, "context.user must be an imported active employee")
             return await _write(conn, name, args, state)
+        if name == "get_dormant_customers":
+            limit = max(1, min(int(args.get("limit") or 50), 200))
+            after = max(0, int(args.get("after") or 0))
+            lid = await conn.fetchval("SELECT list_id FROM lists WHERE name = 'Clienti dormienti' AND NOT archived "
+                                      "ORDER BY list_id DESC LIMIT 1")
+            if lid is None:
+                return {"total": 0, "results": [], "note": "list not found"}
+            total = await conn.fetchval("SELECT count(*) FROM list_memberships WHERE list_id = $1", lid)
+            rows = await conn.fetch(
+                "SELECT o.id, o.properties->>'name' AS name, o.properties->>'fatturato_2025' AS fatturato_2025, "
+                "o.properties->>'classe_cliente' AS classe_cliente, o.properties->>'city' AS city "
+                "FROM list_memberships m JOIN objects o ON o.id = m.record_id WHERE m.list_id = $1 AND NOT o.archived "
+                "ORDER BY o.properties->>'name' OFFSET $2 LIMIT $3", lid, after, limit)
+            state.sources.append(f"lists:{lid}")
+            return {"list_id": str(lid), "total": total, "results": [dict(r) | {"id": str(r["id"])} for r in rows],
+                    "next_after": after + limit if after + limit < total else None}
         if name == "list_kb_documents":
             return {"documents": await kb.list_documents(conn)}
         if name == "search_knowledge_base":
