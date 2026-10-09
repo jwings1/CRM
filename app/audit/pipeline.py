@@ -46,7 +46,43 @@ def run_rules(data: dict) -> dict:
     run_dir = Path(tempfile.mkdtemp(prefix="audit-"))
     res = core.run(data, run_dir, "manager")
     findings = [json.loads(l) for l in (run_dir / "findings.deterministic.jsonl").open()]
-    return {"run_dir": run_dir, "findings": findings, "judgment": res["judgment"], "counts": dict(res["counts"])}
+    return {"run_dir": run_dir, "findings": findings, "judgment": res["judgment"], "counts": dict(res["counts"]),
+            "r8": res["r8"], "r9": res["r9"], "r12": res["counts"].get("CT-COMPANY-FROM-DOMAIN", 0)}
+
+
+def cross_check(rules: dict, res: dict, company_links) -> dict:
+    """R8 / R9 / R12 as the migration computed them vs. the audit's independent recomputation.
+    Differences become findings; companies merged by the agent are marked (expected to differ)."""
+    merged = {x for pair in (company_links or []) for x in pair}
+    by_local = {i: p for i, p, _ in res["objects"].get("companies", [])}
+    crm_r8 = {p.get("id_legacy"): (p.get("fatturato_2025"), p.get("classe_cliente")) for p in by_local.values()}
+    crm_r9 = {by_local[i].get("id_legacy") for i in res.get("dormant", []) if i in by_local}
+    out = {"r8_mismatch": 0, "r9_only_crm": 0, "r9_only_audit": 0, "explained_by_agent_merge": 0,
+           "r12_crm": res["stats"].get("contatti.r12_associated"), "r12_audit": rules.get("r12")}
+    for cid, (rev, cls) in crm_r8.items():
+        mine = rules["r8"].get(cid)
+        if mine and (mine[0] != (rev or "0.00") or mine[1] != cls):
+            why = cid in merged
+            out["explained_by_agent_merge"] += why
+            out["r8_mismatch"] += 1
+            rules["findings"].append({"source": "rule", "code": "AU-R8-MISMATCH", "entity": "companies", "id_legacy": cid,
+                                      "severity": "info" if why else "high",
+                                      "message": f"migration: {rev} / {cls}; audit: {mine[0]} / {mine[1]}"
+                                                 + (" (company merged by the agent)" if why else "")})
+    for cid, code, side in [(c, "AU-R9-ONLY-CRM", "r9_only_crm") for c in crm_r9 - rules["r9"]] + \
+                           [(c, "AU-R9-ONLY-AUDIT", "r9_only_audit") for c in rules["r9"] - crm_r9]:
+        why = cid in merged
+        out[side] += 1
+        out["explained_by_agent_merge"] += why
+        rules["findings"].append({"source": "rule", "code": code, "entity": "companies", "id_legacy": cid,
+                                  "severity": "info" if why else "high",
+                                  "message": "dormant per " + ("the migration only" if side == "r9_only_crm" else "the audit only")
+                                             + (" (company merged by the agent)" if why else "")})
+    if out["r12_crm"] != out["r12_audit"]:
+        rules["findings"].append({"source": "rule", "code": "AU-R12-MISMATCH", "entity": "contacts", "id_legacy": "*",
+                                  "severity": "medium",
+                                  "message": f"R12 links: migration {out['r12_crm']}, audit {out['r12_audit']}"})
+    return out
 
 
 def _batches(judgment: list[dict]) -> list[dict]:
@@ -127,7 +163,7 @@ CREATE TABLE IF NOT EXISTS audit.findings (
 CREATE INDEX IF NOT EXISTS audit_findings_rec ON audit.findings (entity, id_legacy);
 """
 
-_NOT_APPLIED = {"AC-DUPLICATE", "DL-STALE-OPEN", "TK-COMPANY-FROM-CONTACT"}
+_NOT_APPLIED = {"DL-STALE-OPEN", "TK-COMPANY-FROM-CONTACT"}
 
 
 def finding_rows(run_id: str, rules: dict, decisions: dict) -> list[tuple]:

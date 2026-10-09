@@ -428,11 +428,19 @@ def transform(data: dict[str, list[dict]], ids: dict, company_links=None) -> dic
     # ---------------- R6 activities (+ R9 activity in 2025)
     active_2025: set[int] = set()
     contact_to_company = contact_company
+    seen_acts: set = set()
     for r in data.get("attivita", []):
         if N.is_deleted(r.get("cancellato")):
             st["attivita.deleted"] += 1
             continue
         otype = N.activity_type(r.get("tipo"))
+        # same record written twice under two ids (same type, time, text, contact, deal): one stays (the first)
+        dkey = (otype, N.clean(r.get("data")), N.clean(r.get("testo")), N.clean(r.get("id_contatto")),
+                N.clean(r.get("id_opportunita")))
+        if dkey in seen_acts:
+            st["attivita.duplicates_merged"] += 1
+            continue
+        seen_acts.add(dkey)
         when = N.parse_local(r.get("data"))
         uid = users.resolve(r.get("id_utente"))
         props = {

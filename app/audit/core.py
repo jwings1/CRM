@@ -377,9 +377,11 @@ def run(export: dict[str, list[dict]], run_dir: Path, owner_policy: str = "empty
 
     # ---------------------------------------------------------- products  [R4]
     prods = defaultdict(list)
+    deleted_skus = set()
     for r in export["listino"]:
         code = R.sku(r["codice_articolo"])
         if R.is_deleted(r["cancellato"]):
+            deleted_skus.add(code)
             A.flag("GEN-DELETED", "products", r["codice_articolo"].strip(), "info", "marked deleted: not migrated")
             continue
         prods[code].append({"raw": r["codice_articolo"], "name": _txt(r["descrizione"]), "unit": _txt(r["unita"]),
@@ -580,7 +582,12 @@ def run(export: dict[str, list[dict]], run_dir: Path, owner_policy: str = "empty
                 disc = R.discount_pct(lr["sconto"])
                 desc = _txt(lr["descrizione"]) or (prod["name"] if prod else "")
                 if not code or not prod:
-                    A.flag("LI-SKU-UNKNOWN", "line_items", lid, "low", f"article {lr['codice_articolo']!r} not in the price list")
+                    if code in deleted_skus:
+                        A.flag("LI-SKU-DELETED", "line_items", lid, "low",
+                               f"article {code} was deleted from the price list: line kept, no product link")
+                    else:
+                        A.flag("LI-SKU-UNKNOWN", "line_items", lid, "low",
+                               f"article {lr['codice_articolo']!r} never appears in the price list: line kept, no product link")
                 tot = R.line_total(q, pr, disc)
                 lines_total += tot
                 line_items.append({"id_legacy": lid, "deal": idl, "sku": code if prod else None, "name": desc,
@@ -750,10 +757,49 @@ def run(export: dict[str, list[dict]], run_dir: Path, owner_policy: str = "empty
                            "duplicate_of": seen_content[key] if seen_content[key] != idl else None})
     clean["activities"] = activities
 
+    # ---------------------------------------------------------- R12: contact -> company from the email domain
+    dom_idx = {}
+    for c in companies.values():
+        for d in [c["domain"], *c["additional_domains"]]:
+            if d:
+                dom_idx.setdefault(d, c["id_legacy"])
+    for c in contacts.values():
+        if not c["company"] and c["email"]:
+            hit = dom_idx.get(c["email"].rsplit("@", 1)[1])
+            if hit:
+                A.flag("CT-COMPANY-FROM-DOMAIN", "contacts", c["id_legacy"], "info",
+                       f"no company; email domain is a site of {hit} (R12 associates it)",
+                       fix={"field": "company", "old": None, "new": hit, "confidence": "high"})
+
+    # ---------------------------------------------------------- R8 / R9 recomputed independently
+    act_companies_2025 = set()
+    deal_company = {d["id_legacy"]: d["company"] for d in clean["deals"]}
+    for a in activities:
+        if a["duplicate_of"] or not (a["hs_timestamp"] or "").startswith("2025"):
+            continue
+        if a["contact"] and contacts.get(a["contact"], {}).get("company"):
+            act_companies_2025.add(contacts[a["contact"]]["company"])
+        if a["deal"] and deal_company.get(a["deal"]):
+            act_companies_2025.add(deal_company[a["deal"]])
+    revenue, won = defaultdict(Decimal), set()
+    for d in clean["deals"]:
+        if not d["company"] or d["stage"] not in R.WON:
+            continue
+        amt = Decimal(d["amount"]) if d["amount"] else None
+        if amt is not None and d["closedate"] and d["closedate"].startswith("2025"):
+            revenue[d["company"]] += amt * R.FX_TO_EUR.get(d["deal_currency_code"] or "EUR", Decimal(1))
+        if amt is None or amt > 0:
+            won.add(d["company"])
+    r8 = {}
+    for cid in companies:
+        tot = revenue.get(cid, Decimal(0)).quantize(Decimal("0.01"))
+        r8[cid] = (str(tot), "A" if tot >= 100000 else "B" if tot >= 20000 else "C" if tot > 0 else None)
+    r9 = won - act_companies_2025
+
     for s in trails.values():
         s.close()
     A.findings.close()
-    return {"clean": clean, "counts": A.counts, "judgment": A.judgment,
+    return {"clean": clean, "counts": A.counts, "judgment": A.judgment, "r8": r8, "r9": r9,
             "stats": {k: len(v) for k, v in clean.items()} | {"findings": A.findings.n}}
 
 

@@ -78,6 +78,10 @@ async def run(pool, zip_bytes: bytes, started: float | None = None) -> dict:
         async with conn.transaction():
             ids = await setup.ensure(conn)
         res = await asyncio.to_thread(transform, data, ids, decisions["company_links"])
+        try:
+            cross = audit.cross_check(rules, res, decisions["company_links"])
+        except Exception as e:  # the audit never blocks a migration
+            cross = {"error": str(e)}
         del data
         res["ids"] = ids
         t2 = time.monotonic()
@@ -95,7 +99,7 @@ async def run(pool, zip_bytes: bytes, started: float | None = None) -> dict:
         t3 = time.monotonic()
         await conn.execute("ANALYZE objects; ANALYZE associations")
         t4 = time.monotonic()
-        audit_stats = {"rules": rules["counts"], "decisions": decisions["stats"]}
+        audit_stats = {"rules": rules["counts"], "decisions": decisions["stats"], "cross_check": cross}
         try:
             audit_stats["findings_recorded"] = await audit.record(
                 conn, f"migrate-{int(time.time())}", rules, decisions, audit_stats)
