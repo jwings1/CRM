@@ -346,7 +346,11 @@ def run(export: dict[str, list[dict]], run_dir: Path, owner_policy: str = "empty
                 A.flag("CT-MERGE-CONFLICT", "contacts", surv, "medium",
                        "rows with the same email disagree on " + ", ".join(real), evidence=real,
                        judgment="firstname" in real or "lastname" in real)
-        merged["company"] = ref_company(merged.pop("company_raw"), "contacts", surv, "CT")
+        # a reference to a company that isn't migrated is an empty field, also when merging: the company is the
+        # one from the most recent row whose company still exists (RICHIESTE, data rules)
+        raw_latest = merged.pop("company_raw")
+        alive = [c["company_raw"] for c in sorted(grp, key=order_c, reverse=True) if c["company_raw"] in company_map]
+        merged["company"] = company_map[alive[0]] if alive else ref_company(raw_latest, "contacts", surv, "CT")
         contacts[surv] = merged
         if len(grp) > 1:
             trails["contacts"].write({"id_legacy": surv, "versions": [
@@ -770,6 +774,7 @@ def run(export: dict[str, list[dict]], run_dir: Path, owner_policy: str = "empty
                 A.flag("CT-COMPANY-FROM-DOMAIN", "contacts", c["id_legacy"], "info",
                        f"no company; email domain is a site of {hit} (R12 associates it)",
                        fix={"field": "company", "old": None, "new": hit, "confidence": "high"})
+                c["company"] = hit
 
     # ---------------------------------------------------------- R8 / R9 recomputed independently
     act_companies_2025 = set()
