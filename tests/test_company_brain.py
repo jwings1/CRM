@@ -8,7 +8,7 @@ import os
 import unittest
 import zipfile
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -18,6 +18,7 @@ from app.agent.tools import RunState, execute_tool
 from app.errors import ApiError
 from app.main import app
 from app.migrate import setup
+from app.audit import pipeline as audit
 from app.migrate.run import run as migrate
 
 URL = os.environ.get('KB_TEST_DATABASE_URL', '')
@@ -76,7 +77,7 @@ class CompanyBrain(unittest.IsolatedAsyncioTestCase):
         second = await self.publish('KB-LIVE', 'La garanzia dura 36 mesi.')
         self.assertEqual(second['revision'], first['revision'] + 1)
         async with db.pool.acquire() as conn:
-            self.assertIn('36 mesi', (await kb.search_documents(conn, 'garanzia'))[0]['content'])
+            self.assertIn('36 mesi', next(d for d in await kb.search_documents(conn, 'garanzia') if d['doc_id'] == 'KB-LIVE')['content'])
             self.assertIn('24 mesi', (await kb.get_document(conn, 'KB-LIVE', first['revision']))['content'])
             await store.publish_kb_document(conn, {'doc_id': 'KB-LIVE', 'title': 'Ignored seed', 'category': 'policy',
                 'content': 'Old content', 'source': 'seed'}, only_if_missing=True)
@@ -250,7 +251,12 @@ class CompanyBrain(unittest.IsolatedAsyncioTestCase):
         with zipfile.ZipFile(data, 'w') as archive:
             archive.writestr('utenti.csv', 'id_utente;nome;cognome;email;attivo\nU33;Elena;Silvestri;elena@brambilla.it;S\n')
             archive.writestr('aziende.csv', 'id_azienda;ragione_sociale;sito_web\n100;Migrated;new.it\n')
-        await migrate(db.pool, data.getvalue())
+        # The migration audit is separate from roster persistence and may use a model.
+        with patch.object(audit, 'run_rules', return_value={'judgment': [], 'run_dir': None, 'counts': {}}), \
+             patch.object(audit, 'run_decisions', return_value={'company_links': {}, 'stats': {}}), \
+             patch.object(audit, 'cross_check', return_value={}), \
+             patch.object(audit, 'record', new=AsyncMock(return_value=0)):
+            await migrate(db.pool, data.getvalue())
         async with db.pool.acquire() as conn:
             users = await read.list_users(conn, 'Elena')
             self.assertEqual(users[0]['email'], 'elena@brambilla.it')
