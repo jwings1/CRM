@@ -557,8 +557,9 @@
     var input = h('textarea', { id: 'ask', rows: 2, placeholder: 'Write it the way you would to a colleague…' });
     var send = h('button', { class: 'btn primary', type: 'submit' }, 'Send');
     function draw() {
-      log.replaceChildren(chat.length ? chat.map(function (m) { return h('div', { class: 'msg ' + (m.role === 'user' ? 'user' : 'bot') }, m.content); })
-        : h('div', { class: 'small' }, 'Ask for a number, or ask it to update the CRM. Examples: “Segna come vinta la trattativa di …”, “Quanto abbiamo fatturato con … nel 2025?”'));
+      var entries = chat.length ? chat.map(function (m) { return h('div', { class: 'msg ' + (m.role === 'user' ? 'user' : 'bot') }, m.content); })
+        : [h('div', { class: 'small' }, 'Ask for a number, or ask it to update the CRM. Examples: “Segna come vinta la trattativa di …”, “Quanto abbiamo fatturato con … nel 2025?”')];
+      log.replaceChildren.apply(log, entries);
       log.scrollTop = log.scrollHeight;
     }
     function submit(e) {
