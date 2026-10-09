@@ -145,11 +145,13 @@
     var q = h('input', { class: 'search', type: 'search', 'aria-label': 'Search companies', placeholder: 'Search companies by name, domain or P.IVA…' });
     q.addEventListener('keydown', function (e) { if (e.key === 'Enter') go('/companies?q=' + encodeURIComponent(q.value)); });
     mainEl = h('main', {});
-    app.replaceChildren(h('div', { class: 'shell' }, nav,
+    var assistant = document.getElementById('assistant');
+    var layout = h('div', { class: 'shell' }, nav,
       h('div', { class: 'content' },
-        h('header', { class: 'top' }, q, h('span', { class: 'grow' }),
-          h('button', { class: 'btn dark', type: 'button', onclick: openAssistant }, 'Ask the assistant')),
-        mainEl)));
+        h('header', { class: 'top' }, q), mainEl));
+    app.replaceChildren(layout);
+    if (assistant) layout.appendChild(assistant);
+    else openAssistant();
     return mainEl;
   }
   function go(url) { history.pushState({}, '', url); route(); }
@@ -571,10 +573,9 @@
         .then(function () { send.disabled = false; draw(); input.focus(); });
     }
     input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) submit(e); });
-    document.body.appendChild(h('aside', { class: 'drawer', id: 'assistant', 'aria-label': 'Assistant' },
+    document.querySelector('.shell').appendChild(h('aside', { class: 'drawer', id: 'assistant', 'aria-label': 'Assistant' },
       h('header', {}, h('h2', { class: 'grow' }, 'Assistant'),
-        h('button', { class: 'btn', type: 'button', onclick: function () { chat = []; draw(); } }, 'New'),
-        h('button', { class: 'btn', type: 'button', 'aria-label': 'Close assistant', onclick: function () { document.getElementById('assistant').remove(); } }, 'Close')),
+        h('button', { class: 'btn', type: 'button', onclick: function () { chat = []; draw(); } }, 'New')),
       log,
       h('form', { onsubmit: submit }, h('label', { class: 'label', for: 'assistant-user' }, 'Your email (optional, for “my customers”)'), user,
         h('label', { class: 'label', for: 'ask' }, 'Ask the CRM'), input, h('div', { class: 'row' }, h('span', { class: 'small grow' }, 'Follows the CRM rules'), send))));
