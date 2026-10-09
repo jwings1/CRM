@@ -21,9 +21,22 @@ def is_deleted(v: str | None) -> bool:
     return (v or "").strip().upper() in _DELETED
 
 
+_MOJIBAKE = re.compile("[ÃÂ][\u0080-\u00ff\u2018-\u203a\u20ac\u0152\u0153\u0160\u0161\u017d\u017e\u0178\u0192\u02c6\u02dc]|â€")
+
+
 def clean(v: str | None) -> str:
-    """Text as people wrote it, without extra spaces around."""
-    return v.strip() if v else ""
+    """Text as people wrote it, without extra spaces around. Repairs UTF-8 text that Sinergia stored
+    as Windows-1252 ('SocietÃ\xa0' -> 'Società', 'NiccolÃ²' -> 'Niccolò'): ~4,200 rows in the export."""
+    if not v:
+        return ""
+    if _MOJIBAKE.search(v):
+        for enc in ("cp1252", "latin-1"):
+            try:
+                v = v.encode(enc).decode("utf-8")
+                break
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                continue
+    return v.strip()
 
 
 def is_active(v: str | None) -> bool:
@@ -130,7 +143,7 @@ def parse_amount(raw: str | None) -> tuple[Decimal | None, str | None, bool]:
         return None, None, False
     low = s.lower()
     mult = Decimal(1)
-    if re.search(r"\bmln\b|milion", low):
+    if re.search(r"mln\b|milion|\d\s*mio\b", low):          # '1.4mln' has no word boundary before 'mln
         mult = Decimal(1_000_000)
     elif re.search(r"\d\s*k\b|\bk\b|mila", low):
         mult = Decimal(1000)

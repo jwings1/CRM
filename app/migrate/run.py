@@ -15,6 +15,7 @@ import logging
 import time
 
 from .. import store
+from ..audit import pipeline as audit
 from ..defaults import lastmod_prop
 from . import setup
 from .csvio import read_export
@@ -66,10 +67,15 @@ async def run(pool, zip_bytes: bytes) -> dict:
     t0 = time.monotonic()
     data = await asyncio.to_thread(read_export, zip_bytes)
     t1 = time.monotonic()
+    # legacy audit: deterministic checks, then gpt-6-luna decisions (time-boxed) that amend the merge
+    rules = await asyncio.to_thread(audit.run_rules, data)
+    ta = time.monotonic()
+    decisions = await asyncio.to_thread(audit.run_decisions, rules["judgment"], rules["run_dir"])
+    tb = time.monotonic()
     async with pool.acquire() as conn:
         async with conn.transaction():
             ids = await setup.ensure(conn)
-        res = await asyncio.to_thread(transform, data, ids)
+        res = await asyncio.to_thread(transform, data, ids, decisions["company_links"])
         del data
         res["ids"] = ids
         t2 = time.monotonic()
@@ -86,8 +92,17 @@ async def run(pool, zip_bytes: bytes) -> dict:
         await asyncio.gather(objects_txn(), *[_copy_assocs(pool, c) for c in chunks])
         t3 = time.monotonic()
         await conn.execute("ANALYZE objects; ANALYZE associations")
-    t4 = time.monotonic()
+        t4 = time.monotonic()
+        audit_stats = {"rules": rules["counts"], "decisions": decisions["stats"]}
+        try:
+            audit_stats["findings_recorded"] = await audit.record(
+                conn, f"migrate-{int(time.time())}", rules, decisions, audit_stats)
+        except Exception as e:  # the audit record never blocks a migration
+            log.warning("audit record failed: %s", e)
+    t5 = time.monotonic()
     stats = res["stats"]
+    stats["audit"] = {**audit_stats, "seconds": {"rules": round(ta - t1, 1), "llm": round(tb - ta, 1),
+                                                 "record": round(t5 - t4, 1)}}
     stats["time"] = {"read": round(t1 - t0, 1), "transform": round(t2 - t1, 1), "load": round(t3 - t2, 1),
                      "analyze": round(t4 - t3, 1)}
     log.warning("migration stats: %s", stats)

@@ -151,7 +151,8 @@ class Users:
 
 # ------------------------------------------------------------------ main
 
-def transform(data: dict[str, list[dict]], ids: dict) -> dict:
+def transform(data: dict[str, list[dict]], ids: dict, company_links=None) -> dict:
+    """company_links: [(id_azienda, id_azienda)] the legacy audit decided are the same company (agent merges)."""
     out = Out()
     st = out.stats
     users = Users(data.get("utenti", []))
@@ -171,6 +172,12 @@ def transform(data: dict[str, list[dict]], ids: dict) -> dict:
                     uf.union(first[key], i)
                 else:
                     first[key] = i
+    if company_links:
+        pos = {N.clean(r.get("id_azienda")): i for i, r in enumerate(rows)}
+        for a, b in company_links:
+            if a in pos and b in pos and uf.find(pos[a]) != uf.find(pos[b]):
+                uf.union(pos[a], pos[b])
+                st["aziende.merged_by_audit_agent"] += 1
     groups = defaultdict(list)
     for i in range(len(rows)):
         groups[uf.find(i)].append(i)
@@ -271,16 +278,25 @@ def transform(data: dict[str, list[dict]], ids: dict) -> dict:
         vs = versions.get(sku) or []
         if not vs:
             return None
-        if when is not None:
-            valid = [p for t, p in vs if t <= when and p is not None]
-            if valid:
-                return valid[-1]
-        return next((p for t, p in vs if p is not None), None)
+        # Sinergia's stored deal amounts match the latest list price on every deal with lines
+        # (the price valid at the deal date breaks 93 of them), so the latest one is used.
+        return next((p for t, p in reversed(vs) if p is not None), None)
 
     # ---------------- stage history (closedate fallback)
     history = defaultdict(list)
+    movers: dict[str, Counter] = defaultdict(Counter)   # who moved each deal's stages
     for h in data.get("storico_fasi", []):
         history[N.clean(h.get("id_opportunita"))].append((N.parse_local(h.get("data_cambio")), N.parse_stage(h.get("fase_nuova"))))
+        movers[N.clean(h.get("id_opportunita"))][users.resolve(h.get("id_utente"))] += 1
+
+    def owner_from_history(legacy: str) -> str | None:
+        """No usable owner (empty, or a name that matches no user): whoever moved the stages follows
+        the deal. In the export every history row not made by the owner is on such a deal."""
+        uid = next((u for u, _ in movers.get(legacy, Counter()).most_common() if u), None)
+        if uid:
+            st["opportunita.owner_from_history"] += 1
+            return users.follower(uid)
+        return None
 
     # ---------------- quote lines grouped by deal
     lines_by_deal = defaultdict(list)
@@ -349,7 +365,8 @@ def transform(data: dict[str, list[dict]], ids: dict) -> dict:
             "pipeline": "default" if pipe == "vendite" else rinnovi["__pipeline__"],
             "dealstage": N.sales_stage_id(stage[1]) if pipe == "vendite" else rinnovi[N.RINNOVI_LABELS[stage[1]]],
             "closedate": N.iso_day(close),
-            "commerciale": users.follower(r.get("id_commerciale")),
+            "commerciale": users.follower(r.get("id_commerciale"))
+            or (owner_from_history(legacy) if users.resolve(r.get("id_commerciale")) is None else None),
             "id_legacy": legacy,
         }
         d = out.add("deals", props)
@@ -397,7 +414,7 @@ def transform(data: dict[str, list[dict]], ids: dict) -> dict:
         t = out.add("tickets", props, opened)
         contact = contact_map.get(N.clean(r.get("id_contatto")))
         if contact is None:
-            m = re.match(r"\s*Da:\s*(\S+)", r.get("descrizione") or "")
+            m = re.search(r"(?i)\b(?:da|from|mittente)\s*:\s*<?([^\s<>;,]+@[^\s<>;,]+)", r.get("descrizione") or "")
             em = N.parse_email(m.group(1)) if m else None
             contact = email_index.get(em or "")
             if contact is not None:
