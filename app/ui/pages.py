@@ -1,46 +1,64 @@
-"""Jury UI (English, server-rendered, no auth: a browser can't send the bearer token).
-Lane D owns this. Pages the jury opens: company page (fatturato_2025, classe_cliente,
-contacts, deals, history), deals board by stage, dormant customers list, tickets.
-No HubSpot name or logo anywhere."""
+"""Interface (English). A static single-page app in app/ui/static/, served on the public UI routes.
+
+Browsers can't send the bearer token, so the page reads through /ui-api/*: a read-only proxy that forwards a short
+allowlist (GETs, searches, batch reads, list lookups) to the CRM itself. Anything else needs the real token, which the
+page asks for only when someone changes data (moving a deal, the assistant). No HubSpot name or logo anywhere."""
 from __future__ import annotations
 
-import html
+import re
+from pathlib import Path
 
-from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+import httpx
+from fastapi import APIRouter, Request, Response
+from fastapi.responses import FileResponse, RedirectResponse
 
 from .. import config
 
 router = APIRouter()
-
-CSS = """
-:root{--bg:#f7f7f5;--fg:#1b1b1b;--mut:#6b6b6b;--card:#fff;--line:#e4e4e0;--acc:#0b6e4f}
-@media (prefers-color-scheme:dark){:root{--bg:#141414;--fg:#ececec;--mut:#9a9a9a;--card:#1d1d1d;--line:#2c2c2c;--acc:#4fd1a5}}
-*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
-nav{display:flex;gap:16px;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--card)}
-nav a{color:var(--fg);text-decoration:none}nav b{color:var(--acc);margin-right:12px}
-main{padding:20px;max-width:1200px;margin:0 auto}.mut{color:var(--mut)}
-"""
+STATIC = Path(__file__).parent / "static"
+_TYPES = "(companies|contacts|deals|tickets|notes|calls|emails|meetings|tasks|products|line_items)"
+_READ_POST = re.compile(
+    rf"^/crm/v3/objects/{_TYPES}/(search|batch/read)$|^/crm/v4/associations/{_TYPES}/{_TYPES}/batch/read$|^/crm/v3/lists/search$")
+_READ_GET = re.compile(r"^/crm/v3/(objects|pipelines|lists)/")
 
 
-def layout(title: str, body: str) -> HTMLResponse:
-    links = "".join(f'<a href="{r}">{html.escape(k.title())}</a>' for k, r in config.UI_ROUTES.items())
-    return HTMLResponse(
-        f"<!doctype html><html lang=en><head><meta charset=utf-8>"
-        f"<meta name=viewport content='width=device-width,initial-scale=1'><title>{html.escape(title)}</title>"
-        f"<style>{CSS}</style></head><body><nav><b>Brambilla CRM</b>{links}</nav><main>{body}</main></body></html>")
+def _index() -> FileResponse:
+    return FileResponse(STATIC / "index.html", media_type="text/html", headers={"Cache-Control": "no-cache"})
 
 
-def _placeholder(module: str):
+def _page():
     async def page():
-        return layout(module.title(), f"<h1>{html.escape(module.title())}</h1><p class=mut>Coming soon.</p>")
+        return _index()
     return page
 
 
-for _module, _route in config.UI_ROUTES.items():
-    router.add_api_route(_route, _placeholder(_module), methods=["GET"], response_class=HTMLResponse)
+for _route in config.UI_ROUTES.values():
+    router.add_api_route(_route, _page(), methods=["GET"])
+    router.add_api_route(_route + "/{rest:path}", _page(), methods=["GET"])
 
 
-@router.get("/", response_class=HTMLResponse)
+@router.get("/")
 async def home():
-    return layout("Brambilla CRM", "<h1>Brambilla CRM</h1><p class=mut>Pick a module above.</p>")
+    return RedirectResponse("/companies")
+
+
+@router.get("/static/ui/{name}")
+async def asset(name: str):
+    f = (STATIC / name).resolve()
+    if STATIC.resolve() not in f.parents or not f.is_file():
+        return Response(status_code=404)
+    return FileResponse(f, headers={"Cache-Control": "no-cache"})
+
+
+@router.api_route("/ui-api/{path:path}", methods=["GET", "POST"])
+async def read_proxy(path: str, request: Request):
+    p = "/" + path
+    ok = (request.method == "GET" and _READ_GET.match(p)) or (request.method == "POST" and _READ_POST.match(p))
+    if not ok:
+        return Response('{"status":"error","message":"Read-only endpoint","category":"INVALID_AUTHENTICATION"}',
+                        status_code=401, media_type="application/json")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=request.app), base_url="http://crm",
+                                 headers={"Authorization": f"Bearer {config.CRM_TOKEN}"}) as c:
+        r = await c.request(request.method, p, params=request.query_params, content=await request.body(),
+                            headers={"content-type": "application/json"})
+    return Response(r.content, status_code=r.status_code, media_type="application/json")

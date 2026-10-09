@@ -39,6 +39,8 @@ _TOKEN = config.CRM_TOKEN.encode()
 def _public(method: str, path: str) -> bool:
     if path == "/health" or path.startswith("/exports/files/"):
         return True
+    if path.startswith("/ui-api/"):  # read-only proxy for the UI; enforces its own allowlist
+        return True
     if method in ("GET", "HEAD") and (path == "/" or path.startswith("/static/")
                                       or any(path == p or path.startswith(p + "/") for p in _UI_PREFIXES)):
         return True
