@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import orjson
 from fastapi import APIRouter, Request, Response
+from fastapi.responses import ORJSONResponse
 
 from .. import db, store
+from .. import search as search_mod
 from ..defaults import ASSOC_TYPES, INVERSE, OBJECT_TYPES
 from ..errors import ApiError
 
@@ -43,7 +45,182 @@ async def render(conn, otype: str, row, request: Request) -> dict:
     return store.serialize(otype, row, qlist(request, "properties"), assocs)
 
 
-# ------------------------------------------------------------------ Lane A: batch / search / merge go here
+# ------------------------------------------------------------------ search / batch / merge
+# (literal paths registered BEFORE /{objectType}/{objectId})
+
+MAX_BATCH = 100
+
+
+def _inputs(body: dict) -> list:
+    inputs = (body or {}).get("inputs")
+    if not isinstance(inputs, list):
+        raise ApiError(400, "inputs is required")
+    if len(inputs) > MAX_BATCH:
+        raise ApiError(400, f"Too many inputs: {len(inputs)} (max {MAX_BATCH})")
+    return inputs
+
+
+def _batch(results: list, errors: list | None = None, status: int = 200):
+    now = store.now_iso()
+    body = {"status": "COMPLETE", "results": results, "startedAt": now, "completedAt": now}
+    if errors:
+        body["numErrors"] = len(errors)
+        body["errors"] = errors
+        status = 207
+    return ORJSONResponse(body, status_code=status)
+
+
+def _missing(otype: str, ids: list) -> dict:
+    return {"status": "error", "category": "OBJECT_NOT_FOUND",
+            "message": f"Could not get some {otype} objects, they may be deleted or not exist. Check that ids are valid.",
+            "context": {"ids": [str(i) for i in ids]}}
+
+
+@router.post("/{objectType}/search")
+async def search_objects(objectType: str, request: Request):
+    otype = store.resolve_type(objectType)
+    body = await read_json(request)
+    async with db.pool.acquire() as conn:
+        rows, total, nxt = await search_mod.search(conn, otype, body)
+    props = body.get("properties") or None
+    out = {"total": total, "results": [store.serialize(otype, r, props) for r in rows]}
+    if nxt is not None:
+        out["paging"] = {"next": {"after": str(nxt), "link": f"{request.url.path}?after={nxt}"}}
+    return out
+
+
+@router.post("/{objectType}/batch/read")
+async def batch_read(objectType: str, request: Request):
+    otype = store.resolve_type(objectType)
+    body = await read_json(request)
+    inputs = _inputs(body)
+    id_prop = body.get("idProperty") or request.query_params.get("idProperty")
+    archived = qbool(request, "archived")
+    props = body.get("properties") or None
+    results, missing = [], []
+    async with db.pool.acquire() as conn:
+        for inp in inputs:
+            key = (inp or {}).get("id")
+            row = await store.fetch_row(conn, otype, key, id_prop, archived)
+            if row is None:
+                missing.append(key)
+            else:
+                results.append(store.serialize(otype, row, props))
+    return _batch(results, [_missing(otype, missing)] if missing else None)
+
+
+@router.post("/{objectType}/batch/create")
+async def batch_create(objectType: str, request: Request):
+    otype = store.resolve_type(objectType)
+    inputs = _inputs(await read_json(request))
+    async with db.pool.acquire() as conn:
+        async with conn.transaction():
+            rows = [await store.create(conn, otype, inp.get("properties") or {}, inp.get("associations") or None)
+                    for inp in inputs]
+    return _batch([store.serialize(otype, r, list((i.get("properties") or {}).keys()) or None)
+                   for r, i in zip(rows, inputs)], status=201)
+
+
+@router.post("/{objectType}/batch/update")
+async def batch_update(objectType: str, request: Request):
+    otype = store.resolve_type(objectType)
+    body = await read_json(request)
+    inputs = _inputs(body)
+    results, missing = [], []
+    async with db.pool.acquire() as conn:
+        for inp in inputs:
+            try:
+                row = await store.update(conn, otype, inp.get("id"), inp.get("properties") or {},
+                                         id_property=inp.get("idProperty") or body.get("idProperty"))
+                results.append(store.serialize(otype, row, list((inp.get("properties") or {}).keys()) or None))
+            except ApiError as e:
+                if e.status != 404:
+                    raise
+                missing.append(inp.get("id"))
+    return _batch(results, [_missing(otype, missing)] if missing else None)
+
+
+@router.post("/{objectType}/batch/upsert")
+async def batch_upsert(objectType: str, request: Request):
+    """Create-or-update by a unique property (email, partita_iva, ...). Each key is serialized with a
+    transaction-scoped advisory lock, so parallel upserts on the same key never duplicate or lose values."""
+    otype = store.resolve_type(objectType)
+    body = await read_json(request)
+    inputs = _inputs(body)
+    results = []
+    async with db.pool.acquire() as conn:
+        for inp in inputs:
+            id_prop = inp.get("idProperty") or body.get("idProperty")
+            key = inp.get("id")
+            if not id_prop or key in (None, ""):
+                raise ApiError(400, "Each upsert input needs id and idProperty")
+            props = dict(inp.get("properties") or {})
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"{otype}|{id_prop}|{str(key).lower()}")
+                row = await store.fetch_row(conn, otype, key, id_prop)
+                if row is not None:
+                    row = await store.update(conn, otype, row["id"], props)
+                    is_new = False
+                else:
+                    if id_prop not in ("hs_object_id", "id"):
+                        props.setdefault(id_prop, str(key))
+                    row = await store.create(conn, otype, props)
+                    is_new = True
+            res = store.serialize(otype, row, list(props.keys()) or None)
+            res["new"] = is_new
+            results.append(res)
+    return _batch(results)
+
+
+@router.post("/{objectType}/batch/archive", status_code=204)
+async def batch_archive(objectType: str, request: Request):
+    otype = store.resolve_type(objectType)
+    inputs = _inputs(await read_json(request))
+    async with db.pool.acquire() as conn:
+        for inp in inputs:
+            await store.archive(conn, otype, (inp or {}).get("id"))
+    return Response(status_code=204)
+
+
+@router.post("/{objectType}/merge")
+async def merge_objects(objectType: str, request: Request):
+    """Primary keeps its values (fills its empty ones from the merged record), takes over the merged
+    record's associations; the merged record is archived. Companies also keep the merged domains."""
+    otype = store.resolve_type(objectType)
+    body = await read_json(request)
+    try:
+        pid, mid = int(body.get("primaryObjectId")), int(body.get("objectIdToMerge"))
+    except (TypeError, ValueError):
+        raise ApiError(400, "primaryObjectId and objectIdToMerge are required")
+    if pid == mid:
+        raise ApiError(400, "Cannot merge a record with itself")
+    async with db.pool.acquire() as conn:
+        async with conn.transaction():
+            prim = await store.fetch_row(conn, otype, pid, for_update=True)
+            other = await store.fetch_row(conn, otype, mid, for_update=True)
+            if prim is None or other is None:
+                raise ApiError(404, "One of the records to merge was not found", "OBJECT_NOT_FOUND")
+            pp, op_ = prim["properties"], other["properties"]
+            fill = {k: v for k, v in op_.items() if v not in (None, "") and not pp.get(k)
+                    and k not in ("hs_object_id", "createdate", "hs_createdate", "lastmodifieddate", "hs_lastmodifieddate", "email", "partita_iva")}
+            if otype == "companies":
+                doms = [d for d in (pp.get("hs_additional_domains") or "").split(";") if d]
+                for d in [op_.get("domain"), *(op_.get("hs_additional_domains") or "").split(";")]:
+                    if d and d != pp.get("domain") and d not in doms:
+                        doms.append(d)
+                if doms:
+                    fill["hs_additional_domains"] = ";".join(doms)
+            if otype == "contacts" and op_.get("email") and op_.get("email") != pp.get("email"):
+                extra = [e for e in (pp.get("hs_additional_emails") or "").split(";") if e]
+                fill["hs_additional_emails"] = ";".join([*extra, op_["email"]])
+            moved = await conn.fetch("SELECT to_type, to_id, category, type_id FROM associations WHERE from_id=$1", mid)
+            await store.archive(conn, otype, mid)
+            for a in moved:
+                if a["to_id"] != pid:
+                    await store.associate(conn, otype, pid, a["to_type"], a["to_id"], [(a["category"], a["type_id"])], check=False)
+            row = await store.update(conn, otype, pid, fill, validate=False, run_hooks=False) if fill else prim
+    return store.serialize(otype, row)
+
 
 
 # ------------------------------------------------------------------ basic

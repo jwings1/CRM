@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS objects (
     archived_at  TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS objects_type_id   ON objects (object_type, id);
-CREATE INDEX IF NOT EXISTS objects_legacy    ON objects (object_type, (properties->>'id_legacy'));
+DROP INDEX IF EXISTS objects_legacy;
+CREATE INDEX IF NOT EXISTS objects_legacy_lc ON objects (object_type, lower(properties->>'id_legacy'));
 CREATE INDEX IF NOT EXISTS objects_email     ON objects (lower(properties->>'email')) WHERE object_type = 'contacts';
 CREATE INDEX IF NOT EXISTS objects_domain    ON objects (lower(properties->>'domain')) WHERE object_type = 'companies';
 -- HubSpot: one live contact per email.
