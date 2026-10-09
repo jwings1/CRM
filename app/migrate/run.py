@@ -63,14 +63,16 @@ async def _copy_assocs(pool, rows: list) -> None:
         await conn.copy_records_to_table("associations", records=rows, columns=_ASSOC_COLS)
 
 
-async def run(pool, zip_bytes: bytes) -> dict:
+async def run(pool, zip_bytes: bytes, started: float | None = None) -> dict:
     t0 = time.monotonic()
+    started = started or t0
     data = await asyncio.to_thread(read_export, zip_bytes)
     t1 = time.monotonic()
     # legacy audit: deterministic checks, then gpt-6-luna decisions (time-boxed) that amend the merge
     rules = await asyncio.to_thread(audit.run_rules, data)
     ta = time.monotonic()
-    decisions = await asyncio.to_thread(audit.run_decisions, rules["judgment"], rules["run_dir"])
+    decisions = await asyncio.to_thread(audit.run_decisions, rules["judgment"], rules["run_dir"],
+                                        audit.llm_deadline(started))
     tb = time.monotonic()
     async with pool.acquire() as conn:
         async with conn.transaction():

@@ -82,3 +82,9 @@ Migration time: ~31 s locally end-to-end (read 3 s, transform 8 s, load 17 s).
 ## R8 / R9 results on our export
 - R8: 142 companies with 2025 revenue (A 52, B 25, C 65); FX USD 0.92, GBP 1.17; total rounded once.
 - R9: 4,123 companies with a won deal; 803 dormant (no activity in 2025 on their contacts or deals). Static list `Clienti dormienti`.
+
+## Legacy audit inside /__migrate (app/audit)
+- Rules run on the raw export before transform: 31 anomaly classes, ~96k findings on the starter export, recorded in Postgres schema `audit` (`audit.findings`, `audit.runs`).
+- gpt-6-luna judges only cases that change data: 1,433 same-name+city company groups, 161 tickets closed before opened (107 batches, ~$0.045). Merges with confidence >= 0.9 are applied (17 groups / 20 rows on the starter export). Ticket dates: the model can't tell which date is wrong -> left as is.
+- The LLM step gets the time left in the 5-min window (250 s budget - elapsed - 90 s reserve, max 180 s); late batches are dropped, never block the migration.
+- Fixes found by diffing the audit against transform(): broken accents (~4,200 rows), owner from stage history (656 deals), ticket sender anywhere in text (+400), '1.4mln' (12 deals), latest list price for missing unit prices (93 deals: matches Sinergia's stored amounts on all 11,659 deals with lines).

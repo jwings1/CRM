@@ -48,7 +48,7 @@ async def do_migrate(request: Request):
     t0 = time.monotonic()
     data = await download(url)
     t1 = time.monotonic()
-    stats = await migrate.run(db.pool, data)
+    stats = await migrate.run(db.pool, data, started=t0)
     log.warning("migrate: download %.1fs, migrate %.1fs, stats=%s", t1 - t0, time.monotonic() - t1, stats)
     return Response(status_code=204)
 

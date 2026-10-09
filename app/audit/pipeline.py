@@ -23,7 +23,18 @@ from . import core, judge
 
 log = logging.getLogger("crm")
 
-DEADLINE_S = float(os.environ.get("AUDIT_LLM_DEADLINE_S", "75"))
+# The LLM step gets whatever the 5-minute /__migrate window leaves: TOTAL_S minus the time already spent
+# (download, read, rules) minus a reserve for transform + load + record (2x what they take locally).
+TOTAL_S = float(os.environ.get("AUDIT_MIGRATE_BUDGET_S", "250"))
+POST_RESERVE_S = float(os.environ.get("AUDIT_POST_LLM_RESERVE_S", "90"))
+DEADLINE_MAX_S = float(os.environ.get("AUDIT_LLM_DEADLINE_S", "180"))
+
+
+def llm_deadline(started: float | None) -> float:
+    if started is None:
+        return DEADLINE_MAX_S
+    left = TOTAL_S - (time.monotonic() - started) - POST_RESERVE_S
+    return max(15.0, min(DEADLINE_MAX_S, left))
 BUDGET_USD = float(os.environ.get("AUDIT_LLM_BUDGET_USD", "0.50"))
 WORKERS = int(os.environ.get("AUDIT_LLM_WORKERS", "24"))
 MIN_CONF = 0.9
@@ -57,7 +68,7 @@ def _batches(judgment: list[dict]) -> list[dict]:
     return out
 
 
-def run_decisions(judgment: list[dict], run_dir: Path) -> dict:
+def run_decisions(judgment: list[dict], run_dir: Path, deadline_s: float | None = None) -> dict:
     """gpt-6-luna on the judgment cases. Never raises; what isn't back by the deadline stays as the rules left it."""
     key = os.environ.get("OPENROUTER_API_KEY")
     stats = {"batches": 0, "answered": 0, "late_or_failed": 0, "cost_usd": 0.0, "merges": 0}
@@ -71,7 +82,9 @@ def run_decisions(judgment: list[dict], run_dir: Path) -> dict:
     t0 = time.monotonic()
     ex = ThreadPoolExecutor(WORKERS)
     futs = {ex.submit(judge.call, key, ledger, cache, b["prompt"], 4000): b for b in batches}
-    done, pending = wait(futs, timeout=DEADLINE_S)
+    deadline_s = deadline_s or DEADLINE_MAX_S
+    stats["deadline_s"] = round(deadline_s, 1)
+    done, pending = wait(futs, timeout=deadline_s)
     ex.shutdown(wait=False, cancel_futures=True)
     verdicts, links = [], []
     for f in done:
