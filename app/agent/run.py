@@ -90,6 +90,10 @@ def _finish(text: str, state: RunState) -> str:
         text = 'Non risultano modifiche verificate nel CRM. Serve completare o chiarire la richiesta.'
     if state.actions:
         text += '\n\nModifiche verificate:\n' + _action_summary(state)
+    # plain text for the chat: no markdown markers (**bold**, __bold__, `code`, # headings)
+    text = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: m.group(1) or m.group(2), text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"(?m)^#{1,6}\s+", "", text)
     return text.strip()
 
 
