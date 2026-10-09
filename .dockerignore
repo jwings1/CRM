@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+starter
+starter.zip
+docs
+*.pdf
+tests
+__pycache__
+.venv

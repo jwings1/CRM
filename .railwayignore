@@ -1,0 +1,6 @@
+starter
+starter.zip
+docs
+*.pdf
+.venv
+__pycache__
