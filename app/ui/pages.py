@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, Request, Response
@@ -55,8 +56,8 @@ async def read_proxy(path: str, request: Request):
     assistant = request.method == "POST" and p == "/__agente"
     if assistant:
         origin = request.headers.get("origin")
-        expected_origin = f"{request.url.scheme}://{request.url.netloc}"
-        if (origin and origin != expected_origin) or request.headers.get("sec-fetch-site") == "cross-site":
+        host = request.headers.get("host", "").split(":", 1)[0].lower()
+        if (origin and urlsplit(origin).hostname != host) or request.headers.get("sec-fetch-site") == "cross-site":
             return Response(status_code=403)
         if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
             return Response(status_code=415)
